@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from ..dsp.demod import DEFAULT_BW, Demodulator
 from ..dsp.spectrum import SpectrumProcessor
-from ..sdr.base import DeviceConfig, DeviceInfo, SdrDevice
+from ..sdr.base import DeviceConfig, DeviceError, DeviceInfo, SdrDevice
 from ..sdr.discovery import create_device
 from .broadcast import Broadcaster
 from .state import AudioChunk, RadioState, SpectrumFrame, StatePatch, Stats
@@ -22,6 +22,8 @@ log = logging.getLogger(__name__)
 
 SPAN_USABLE = 0.45  # fraction of the sample rate either side of centre usable for tuning
 RING_SECONDS = 0.5
+JOIN_TIMEOUT = 2.0  # seconds to wait for a run's threads on close
+DEV_LOCK_TIMEOUT = 3.0  # seconds to wait for an in-progress device read/configure
 
 
 class StateError(ValueError):
@@ -36,17 +38,25 @@ def _fmt_validation(exc: ValidationError) -> str:
     return "; ".join(str(e["msg"]).removeprefix("Value error, ") for e in exc.errors())
 
 
+class _Run:
+    """One open/close cycle: its device, its own stop event, ring and threads."""
+
+    def __init__(self, device: SdrDevice, ring_size: int) -> None:
+        self.device = device
+        self.stop = threading.Event()
+        self.ring: queue.Queue = queue.Queue(maxsize=ring_size)
+        self.threads: list[threading.Thread] = []
+
+
 class RadioSession:
     def __init__(self, device_factory: Callable[[str], SdrDevice] = create_device) -> None:
         self._factory = device_factory
-        self._lock = threading.RLock()
-        self._dev_lock = threading.Lock()
-        self._device: SdrDevice | None = None
+        self._life = threading.RLock()  # serialises open()/close()
+        self._lock = threading.RLock()  # guards state and DSP
+        self._dev_lock = threading.Lock()  # held by the reader during read, by update during configure
+        self._run: _Run | None = None
         self._state = RadioState()
         self._stats = Stats()
-        self._stop = threading.Event()
-        self._threads: list[threading.Thread] = []
-        self._ring: queue.Queue = queue.Queue(maxsize=1)
         self._spectrum: SpectrumProcessor | None = None
         self._demod: Demodulator | None = None
         self._block = 32768
@@ -69,73 +79,95 @@ class RadioSession:
             return self._stats.model_copy(update={"clients": self.spectrum.subscriber_count})
 
     def open(self, device_id: str, patch: StatePatch | None = None) -> RadioState:
-        self.close()
-        device = self._factory(device_id)
-        try:
-            device.open()
-            base = self._state.model_copy(update={"device_id": device_id, "running": False})
-            merged = self._merge(base, patch)
-            explicit = patch.model_dump(exclude_unset=True) if patch else {}
-            if "center_hz" not in explicit:
-                merged = merged.model_copy(update={"center_hz": merged.tune_hz + merged.sample_rate / 4})
-            merged = self._recentre(merged, device.info, center_explicit=False)
-            # Build the DSP before touching the device so a rejected value leaves nothing half-applied.
-            spectrum, demod = self._build_dsp(merged)
-            applied = device.configure(self._device_config(merged))
-        except BaseException:
-            device.close()
-            raise
-        merged = self._with_applied(merged, applied).model_copy(update={"running": True})
-        with self._lock:
-            self._device = device
-            self._state = merged
-            self._stats = Stats()
-            self._spectrum = spectrum
-            self._demod = demod
-            self._block = block_size_for(merged.sample_rate)
-            self._ring = queue.Queue(maxsize=max(4, math.ceil(RING_SECONDS * merged.sample_rate / self._block)))
-            self._gen += 1
-            self._stop.clear()
-        self._threads = [
-            threading.Thread(target=self._reader_loop, args=(device,), name="sdr-reader", daemon=True),
-            threading.Thread(target=self._dsp_loop, args=(device,), name="sdr-dsp", daemon=True),
-        ]
-        for t in self._threads:
-            t.start()
-        self._publish_state()
-        return self.state
+        with self._life:
+            device = self._factory(device_id)
+            # Validate everything that does not need the hardware first (device.info is available
+            # before open), so a rejected request leaves the running radio untouched.
+            try:
+                base = self.state.model_copy(update={"device_id": device_id, "running": False})
+                merged = self._merge(base, patch)
+                explicit = patch.model_dump(exclude_unset=True) if patch else {}
+                if "center_hz" not in explicit:
+                    merged = merged.model_copy(update={"center_hz": merged.tune_hz + merged.sample_rate / 4})
+                merged = self._recentre(merged, device.info, center_explicit=False)
+                spectrum, demod = self._build_dsp(merged)
+            except BaseException:
+                self._safe_close(device)
+                raise
+            self.close()  # release the previous device (it may be the same hardware)
+            try:
+                device.open()
+                applied = device.configure(self._device_config(merged))
+            except BaseException:
+                self._safe_close(device)
+                raise
+            merged = self._with_applied(merged, applied).model_copy(update={"running": True})
+            demod.set_offset(merged.tune_hz - merged.center_hz)
+            block = block_size_for(merged.sample_rate)
+            run = _Run(device, max(4, math.ceil(RING_SECONDS * merged.sample_rate / block)))
+            with self._lock:
+                self._run = run
+                self._state = merged
+                self._stats = Stats()
+                self._spectrum = spectrum
+                self._demod = demod
+                self._block = block
+                self._gen += 1
+            run.threads = [
+                threading.Thread(target=self._reader_loop, args=(run,), name="sdr-reader", daemon=True),
+                threading.Thread(target=self._dsp_loop, args=(run,), name="sdr-dsp", daemon=True),
+            ]
+            for t in run.threads:
+                t.start()
+            self._publish_state()
+            return self.state
 
     def close(self) -> None:
-        self._stop.set()
-        for t in self._threads:
-            t.join(timeout=2.0)
-        self._threads = []
-        with self._lock:
-            device, self._device = self._device, None
-            was_running = self._state.running
-            self._state = self._state.model_copy(update={"running": False})
-        if device is not None:
-            try:
-                device.close()
-            except Exception:
-                log.exception("error closing device")
-        if was_running:
-            self._publish_state()
+        with self._life:
+            with self._lock:
+                run, self._run = self._run, None
+                was_running = self._state.running
+                self._state = self._state.model_copy(update={"running": False})
+            if run is not None:
+                run.stop.set()
+                for t in run.threads:
+                    t.join(timeout=JOIN_TIMEOUT)
+                # Avoid closing the device mid-read when we can; stop waiting after a timeout.
+                got = self._dev_lock.acquire(timeout=DEV_LOCK_TIMEOUT)
+                try:
+                    self._safe_close(run.device)
+                finally:
+                    if got:
+                        self._dev_lock.release()
+            if was_running:
+                self._publish_state()
+
+    @staticmethod
+    def _safe_close(device: SdrDevice) -> None:
+        try:
+            device.close()
+        except Exception:
+            log.exception("error closing device")
 
     def update(self, patch: StatePatch) -> RadioState:
         explicit = patch.model_dump(exclude_unset=True)
         with self._lock:
             old = self._state
             new = self._merge(old, patch)
-            device = self._device
-            if device is not None and old.running:
+            run = self._run
+            if run is not None and old.running:
+                device = run.device
                 new = self._recentre(new, device.info,
                                      center_explicit="center_hz" in explicit and "tune_hz" not in explicit)
                 plan = self._plan_dsp(old, new)  # validates everything before any side effect
                 if self._device_fields(new) != self._device_fields(old):
-                    with self._dev_lock:
+                    if not self._dev_lock.acquire(timeout=DEV_LOCK_TIMEOUT):
+                        raise DeviceError("device not responding")
+                    try:
                         applied = device.configure(self._device_config(new))
                         self._gen += 1
+                    finally:
+                        self._dev_lock.release()
                     new = self._with_applied(new, applied)
                 self._apply_dsp(old, new, plan)
             self._state = new
@@ -199,7 +231,7 @@ class RadioSession:
             raise StateError(str(exc)) from exc
 
     def _plan_dsp(self, old: RadioState, new: RadioState):
-        """Construct/validate the DSP changes without applying them. Returns (spectrum, demod), either may be None."""
+        """Construct/validate the DSP changes without applying them: (spectrum, demod), either may be None."""
         spectrum = demod = None
         if new.sample_rate != old.sample_rate:
             spectrum, demod = self._build_dsp(new)
@@ -226,10 +258,10 @@ class RadioSession:
                 self._spectrum.reset()
         if demod is not None:
             self._demod = demod
-        else:
-            if (new.mode, new.bw_hz) != (old.mode, old.bw_hz):
-                self._demod.set_mode(new.mode, new.bw_hz)
-            self._demod.set_offset(new.tune_hz - new.center_hz)
+        elif (new.mode, new.bw_hz) != (old.mode, old.bw_hz):
+            self._demod.set_mode(new.mode, new.bw_hz)
+        # always use the centre the device actually applied
+        self._demod.set_offset(new.tune_hz - new.center_hz)
         if new.sample_rate != old.sample_rate:
             self._block = block_size_for(new.sample_rate)
 
@@ -238,18 +270,18 @@ class RadioSession:
 
     # --- threads ----------------------------------------------------------------------------
 
-    def _reader_loop(self, device: SdrDevice) -> None:
-        while not self._stop.is_set():
+    def _reader_loop(self, run: _Run) -> None:
+        device, ring = run.device, run.ring
+        while not run.stop.is_set():
             try:
                 with self._dev_lock:
                     gen = self._gen
                     block = device.read(self._block)
             except Exception as exc:
-                if not self._stop.is_set():
+                if not run.stop.is_set():
                     log.warning("device read failed: %s", exc)
-                    self._fail(device, exc)
+                    self._fail(run, exc)
                 return
-            ring = self._ring
             try:
                 ring.put_nowait((gen, block))
             except queue.Full:
@@ -264,31 +296,35 @@ class RadioSession:
                 except queue.Full:
                     pass
 
-    def _fail(self, device: SdrDevice, exc: Exception) -> None:
-        self.events.publish({"type": "error", "code": "device_lost", "message": str(exc)})
-        self._stop.set()
+    def _fail(self, run: _Run, exc: Exception) -> None:
+        run.stop.set()
         with self._lock:
-            if self._device is device:
-                self._device = None
-            self._state = self._state.model_copy(update={"running": False})
-        try:
-            device.close()
-        except Exception:
-            pass
+            current = self._run is run
+            if current:
+                self._run = None
+                self._state = self._state.model_copy(update={"running": False})
+        if not current:  # a newer open()/close() already superseded this run
+            return
+        self.events.publish({"type": "error", "code": "device_lost", "message": str(exc)})
+        self._safe_close(run.device)
         self._publish_state()
 
-    def _dsp_loop(self, device: SdrDevice) -> None:
+    def _dsp_loop(self, run: _Run) -> None:
+        device = run.device
         last_pub = 0.0
         last_stats = time.monotonic()
         frames = 0
-        pending = None
-        while not self._stop.is_set():
+        pending = None  # (gen, center_hz, sample_rate, spectrum_db) captured when produced
+        while not run.stop.is_set():
             try:
-                gen, block = self._ring.get(timeout=0.2)
+                gen, block = run.ring.get(timeout=0.2)
             except queue.Empty:
                 continue
             with self._lock:
+                if self._run is not run:
+                    return
                 if gen != self._gen:
+                    pending = None
                     continue
                 st = self._state
                 db = self._spectrum.process(block)
@@ -296,10 +332,12 @@ class RadioSession:
                 rate = self._demod.out_rate
             now = time.monotonic()
             if db is not None:
-                pending = db
+                pending = (gen, st.center_hz, st.sample_rate, db)
+            if pending is not None and pending[0] != gen:
+                pending = None
             if pending is not None and now - last_pub >= 1.0 / st.fps:
                 self._seq += 1
-                self.spectrum.publish(SpectrumFrame(self._seq, st.center_hz, st.sample_rate, pending))
+                self.spectrum.publish(SpectrumFrame(self._seq, pending[1], pending[2], pending[3]))
                 pending = None
                 last_pub = now
                 frames += 1

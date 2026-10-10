@@ -193,3 +193,129 @@ def test_reopen_closes_previous_device():
     assert made[0]._open is False and made[1]._open is True
     s.close()
     assert wait_no_threads() == []
+
+
+# --- fix round 1 ---------------------------------------------------------------------------------
+
+
+def tone_factory(_id):
+    from qrm_hunter.sdr.synthetic import Source
+
+    return SyntheticDevice(sources=[Source("cw", 7_150_000.0, -30.0), Source("cw", 14_350_000.0, -30.0)],
+                           noise_db=-90.0, realtime=True)
+
+
+def test_published_frames_always_match_their_own_labels():
+    """A frame held back by fps throttling must never be published with a newer centre/rate."""
+    s = RadioSession(tone_factory)
+    TUNES = (7_100_000.0, 14_200_000.0)
+    TONES = (7_150_000.0, 14_350_000.0)  # offsets differ per tune, so a mislabelled frame is detectable
+
+    async def main():
+        sub = s.spectrum.subscribe()
+        frames = []
+
+        async def collect():
+            while True:
+                frames.append(await sub.queue.get())
+
+        task = asyncio.create_task(collect())
+        # 65536-point FFT => some blocks produce no spectrum, which keeps a pending frame around
+        await asyncio.to_thread(s.open, "x", StatePatch(tune_hz=7_100_000.0, fft_size=65536, fps=60.0))
+        for i in range(8):
+            await asyncio.sleep(0.25)
+            await asyncio.to_thread(s.update, StatePatch(tune_hz=TUNES[(i + 1) % 2]))
+        await asyncio.sleep(0.4)
+        task.cancel()
+        return frames
+
+    frames = asyncio.run(main())
+    s.close()
+    assert len(frames) > 10
+    for f in frames:
+        n = f.spectrum_db.size
+        peak = f.center_hz + (int(f.spectrum_db.argmax()) - n // 2) * f.sample_rate / n
+        assert min(abs(peak - t) for t in TONES) < 3 * f.sample_rate / n, (peak, f.center_hz)
+
+
+def test_concurrent_open_leaves_one_run():
+    made = []
+    lock = threading.Lock()
+
+    def tracking_factory(_id):
+        d = SyntheticDevice(realtime=True)
+        with lock:
+            made.append(d)
+        return d
+
+    s = RadioSession(tracking_factory)
+    ts = [threading.Thread(target=s.open, args=("synthetic",)) for _ in range(2)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert len(sdr_threads()) == 2
+    assert sum(d._open for d in made) == 1
+    s.close()
+    assert wait_no_threads() == []
+    assert not any(d._open for d in made)
+
+
+class SlowOnceDevice(SyntheticDevice):
+    """On its 3rd read, ignores everything for `stall` seconds, then fails like a closed device."""
+
+    def __init__(self, stall):
+        super().__init__(realtime=True)
+        self.reads = 0
+        self.stall = stall
+
+    def read(self, n):
+        self.reads += 1
+        if self.reads == 3:
+            time.sleep(self.stall)
+            raise DeviceError("closed under us")
+        return super().read(n)
+
+
+def test_stuck_old_reader_cannot_kill_a_new_session(monkeypatch):
+    from qrm_hunter.engine import session as session_mod
+
+    monkeypatch.setattr(session_mod, "JOIN_TIMEOUT", 0.2)
+    monkeypatch.setattr(session_mod, "DEV_LOCK_TIMEOUT", 0.2)
+    devices = [SlowOnceDevice(1.0), SyntheticDevice(realtime=True)]
+    s = RadioSession(lambda _id: devices.pop(0))
+    s.open("synthetic")
+    time.sleep(0.3)  # old reader is now stuck inside read()
+    s.open("synthetic")
+    time.sleep(1.5)  # old read finally fails after the new run started
+    try:
+        assert s.state.running
+        assert len(sdr_threads()) == 2
+    finally:
+        s.close()
+    assert wait_no_threads() == []
+
+
+def test_update_with_unresponsive_device_raises_and_keeps_state(monkeypatch):
+    from qrm_hunter.engine import session as session_mod
+
+    monkeypatch.setattr(session_mod, "JOIN_TIMEOUT", 0.2)
+    monkeypatch.setattr(session_mod, "DEV_LOCK_TIMEOUT", 0.2)
+    s = RadioSession(lambda _id: SlowOnceDevice(1.5))
+    s.open("synthetic")
+    time.sleep(0.3)
+    before = s.state
+    with pytest.raises(DeviceError, match="not responding"):
+        s.update(StatePatch(center_hz=8_000_000.0))
+    assert s.state == before
+    s.close()
+    assert wait_no_threads(3.0) == []
+
+
+def test_rejected_reopen_keeps_running_radio(session):
+    before = session.open("synthetic")
+    with pytest.raises(StateError):
+        session.open("synthetic", StatePatch(mode="CW", bw_hz=20000))
+    assert session.state == before
+    assert session.state.running
+    assert len(sdr_threads()) == 2
