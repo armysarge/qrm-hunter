@@ -4,9 +4,11 @@ import shutil
 
 import pytest
 from qrm_hunter.config.memories import (
+    MemoriesNotWritable,
     Memory,
     MemoryFields,
     MemoryStore,
+    _csv_cell,
     export_csv,
     memories_path_for,
     merge_import,
@@ -92,9 +94,8 @@ def test_unreadable_file_not_overwritten_when_backup_fails(tmp_path, monkeypatch
         raise PermissionError(32, "busy", str(path))
 
     monkeypatch.setattr(shutil, "copy2", busy)
-    with caplog.at_level("WARNING"):
-        store.save([mem()])  # must not raise, must not overwrite
-    assert "not overwriting" in caplog.text
+    with pytest.raises(MemoriesNotWritable, match="not overwriting"):
+        store.save([mem()])
     assert path.read_text(encoding="utf-8") == "[]"
 
 
@@ -139,6 +140,23 @@ def test_merge_skips_duplicates_and_respects_limit():
     assert [m.name for m in merged] == ["A", "B"] and (added, skipped) == (1, 2)
     merged, added, skipped = merge_import([a], [b, mem("B", 2e6)], replace=True)
     assert [m.name for m in merged] == ["B"] and (added, skipped) == (1, 1)
+
+
+def test_parse_csv_with_utf8_bom():
+    rows, bad = parse_import("csv", "﻿name,tune_hz,mode,bw_hz\nFT8,14074000,USB,2700\n")
+    assert bad == 0 and [r.name for r in rows] == ["FT8"]
+
+
+@pytest.mark.parametrize("text", ["=1+1", "+1", "-1", "@SUM(A1)", "\tx", "\rx"])
+def test_csv_cell_neutralises_formulas(text):
+    assert _csv_cell(text) == "'" + text
+    assert _csv_cell("a" + text) == "a" + text  # only a leading trigger counts
+    assert _csv_cell(-5.0) == -5.0 and _csv_cell(None) == ""
+
+
+def test_export_csv_formula_guard_on_text_columns():
+    row = export_csv([mem(name="=HYPERLINK(1)", note="@cmd")]).splitlines()[1]
+    assert row == "'=HYPERLINK(1),14074000.0,USB,2700.0,,,'@cmd"
 
 
 def test_export_csv_columns():

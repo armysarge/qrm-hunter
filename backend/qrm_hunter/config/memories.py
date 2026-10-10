@@ -25,6 +25,10 @@ MAX_IMPORT_BYTES = 1_000_000
 CSV_COLUMNS = ("name", "tune_hz", "mode", "bw_hz", "gain_db", "direct_sampling", "note")
 
 
+class MemoriesNotWritable(OSError):
+    """The memories file was never read and cannot be backed up, so it must not be overwritten."""
+
+
 class MemoryFields(BaseModel):
     """What the UI sends to create a memory (POST /api/memories)."""
 
@@ -107,7 +111,7 @@ def parse_import(fmt: str, data: str) -> tuple[list[Memory], int]:
             raise ValueError("expected a JSON list of memories")
         rows = doc
     else:
-        reader = csv.DictReader(io.StringIO(data))
+        reader = csv.DictReader(io.StringIO(data.removeprefix("\ufeff")))  # Excel writes a UTF-8 BOM
         if reader.fieldnames is None or not {"name", "tune_hz", "mode", "bw_hz"} <= set(reader.fieldnames):
             raise ValueError("CSV needs a header row with at least name,tune_hz,mode,bw_hz")
         rows = []
@@ -157,13 +161,26 @@ def export_json(memories: list[Memory]) -> str:
     return json.dumps([m.model_dump() for m in sorted_memories(memories)], indent=2)
 
 
+_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_cell(value: object) -> object:
+    """Neutralise spreadsheet formulas (OWASP CSV injection): text cells starting with
+    = + - @ tab or CR get a leading apostrophe. Numbers are written as numbers."""
+    if value is None:
+        return ""
+    if isinstance(value, str) and value.startswith(_FORMULA_START):
+        return "'" + value
+    return value
+
+
 def export_csv(memories: list[Memory]) -> str:
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
     writer.writerow(CSV_COLUMNS)
     for m in sorted_memories(memories):
         d = m.model_dump()
-        writer.writerow(["" if d[c] is None else d[c] for c in CSV_COLUMNS])
+        writer.writerow([_csv_cell(d[c]) for c in CSV_COLUMNS])
     return buf.getvalue()
 
 
@@ -208,9 +225,8 @@ class MemoryStore:
             try:
                 shutil.copy2(self.path, bak)
             except OSError as exc:
-                log.warning("memories file %s was never read and cannot be backed up (%s); "
-                            "not overwriting it", self.path, exc)
-                return
+                raise MemoriesNotWritable(f"memories file {self.path} was never read and cannot be "
+                                          f"backed up ({exc}); not overwriting it") from exc
             log.warning("memories file %s was never read; backed up to %s before saving", self.path, bak)
         self._unread_original = False
         self.path.parent.mkdir(parents=True, exist_ok=True)

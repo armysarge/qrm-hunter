@@ -394,3 +394,71 @@ def test_memory_writes_need_json_content_type(client):
                     headers={"Content-Type": "application/x-www-form-urlencoded"})
     assert r.status_code == 415
     assert len(client.get("/api/memories").json()) == 1
+
+
+def _fail_saves(monkeypatch, exc):
+    from qrm_hunter.config.memories import MemoryStore
+
+    def fail(self, memories):
+        raise exc
+
+    monkeypatch.setattr(MemoryStore, "save", fail)
+
+
+def _record_events(monkeypatch, session):
+    sent = []
+    monkeypatch.setattr(session.events, "publish", sent.append)
+    return sent
+
+
+def test_memory_save_failure_is_500_and_leaves_list_unchanged(client, monkeypatch):
+    m = client.post("/api/memories", json=MEMORY).json()
+    sent = _record_events(monkeypatch, client.session)
+    _fail_saves(monkeypatch, PermissionError(13, "Access is denied"))
+    r = client.post("/api/memories", json={**MEMORY, "name": "other"})
+    assert r.status_code == 500 and "Access is denied" in r.json()["detail"]
+    assert client.patch(f"/api/memories/{m['id']}", json={"note": "x"}).status_code == 500
+    assert client.delete(f"/api/memories/{m['id']}", headers=JSON_HEADERS).status_code == 500
+    assert client.get("/api/memories").json() == [m]
+    assert sent == []
+
+
+def test_memory_unbacked_file_is_503_and_not_published(client, monkeypatch):
+    from qrm_hunter.config.memories import MemoriesNotWritable
+
+    sent = _record_events(monkeypatch, client.session)
+    _fail_saves(monkeypatch, MemoriesNotWritable("never read, cannot back up"))
+    r = client.post("/api/memories", json=MEMORY)
+    assert r.status_code == 503 and r.json()["detail"] == "settings folder not writable"
+    assert client.get("/api/memories").json() == [] and sent == []
+
+
+def test_replace_import_with_no_valid_rows_is_refused(client):
+    client.post("/api/memories", json=MEMORY)
+    bad_csv = "name,tune_hz,mode,bw_hz\nBroken,abc,USB,2700\n"
+    r = client.post("/api/memories/import", json={"format": "csv", "data": bad_csv, "replace": True})
+    assert r.status_code == 422
+    r = client.post("/api/memories/import", json={"format": "json", "data": "[]", "replace": True})
+    assert r.status_code == 422
+    assert [m["name"] for m in client.get("/api/memories").json()] == ["FT8 20m"]
+
+
+def test_memory_routes_need_the_token(tmp_path):
+    c, _, _ = make_client(tmp_path, token="s3cret")
+    with c:
+        assert c.get("/api/memories").status_code == 401
+        assert c.post("/api/memories", json=MEMORY).status_code == 401
+        assert c.get("/api/memories/export?format=csv").status_code == 401
+        assert c.post("/api/memories/import", json={"format": "csv", "data": ""}).status_code == 401
+        assert c.patch("/api/memories/x", json={"note": "n"}).status_code == 401
+        assert c.delete("/api/memories/x", headers=JSON_HEADERS).status_code == 401
+        ok = c.get("/api/memories", headers={"Authorization": "Bearer s3cret"})
+        assert ok.status_code == 200 and ok.json() == []
+
+
+def test_direct_sampling_is_ignored_not_rejected_by_devices_without_it(client):
+    """A recalled direct_sampling value is not an error on a device without direct sampling: the
+    engine clamps it to "off". The UI still omits it there to avoid a pointless reconfigure."""
+    client.post("/api/session/open", json={"device_id": "synthetic"})
+    r = client.patch("/api/state", json={"direct_sampling": "q"})
+    assert r.status_code == 200 and r.json()["direct_sampling"] == "off"

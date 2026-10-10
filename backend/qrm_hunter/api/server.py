@@ -27,6 +27,7 @@ from ..config.memories import (
     MAX_IMPORT_BYTES,
     MAX_MEMORIES,
     ImportRequest,
+    MemoriesNotWritable,
     Memory,
     MemoryFields,
     MemoryPatch,
@@ -196,9 +197,17 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
     _restore_last_session(session, app.state.settings)
 
     def save_memories(memories: list[Memory]) -> None:
-        """Persist and announce a new memory list (call with memories_lock held)."""
+        """Persist, then commit and announce a new memory list (call with memories_lock held).
+        If the file cannot be written, the in-memory list is left unchanged and nothing is published."""
+        try:
+            memory_store.save(memories)
+        except MemoriesNotWritable as exc:
+            log.warning("%s", exc)
+            raise HTTPException(503, "settings folder not writable") from exc
+        except OSError as exc:
+            log.warning("cannot save memories to %s (%s)", memory_store.path, exc)
+            raise HTTPException(500, f"could not save memories: {exc.strerror or exc}") from exc
         app.state.memories = memories
-        memory_store.save(memories)
         # Other open UIs refetch on this event.
         session.events.publish({"type": "memories"})
 
@@ -305,6 +314,9 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
             incoming, invalid = parse_import(req.format, req.data)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+        if req.replace and not incoming:
+            # Refuse rather than replace everything with nothing (wrong file, all rows invalid).
+            raise HTTPException(422, "no valid memories in the import; nothing was replaced")
         with memories_lock:
             merged, added, skipped = merge_import(app.state.memories, incoming, req.replace)
             if added or req.replace:
