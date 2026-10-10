@@ -1,0 +1,39 @@
+[project]
+name = "qrm-hunter"
+version = "0.1.0"
+description = "See, record, identify and hunt down HF QRM with common SDRs"
+requires-python = ">=3.12"
+dependencies = [
+  "numpy>=2.0",
+  "scipy>=1.13",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "pydantic>=2.7",
+  "platformdirs>=4.2",
+  "tomli-w>=1.0",
+  "pywebview>=5.0",
+  "pyrtlsdr>=0.3.0",
+  "pyrtlsdrlib>=0.0.2",
+]
+
+[project.scripts]
+qrm-hunter = "qrm_hunter.app:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend/qrm_hunter"]
+artifacts = ["backend/qrm_hunter/web/**"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["hardware: needs a real SDR attached"]
+addopts = "-m 'not hardware' --import-mode=importlib"
+
+[tool.ruff]
+line-length = 110

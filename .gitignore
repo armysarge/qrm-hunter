@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+node_modules/
+backend/qrm_hunter/web/
+dist/
+build/
+*.sigmf-data
+*.sigmf-meta
