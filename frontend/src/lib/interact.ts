@@ -1,5 +1,10 @@
 import { panView, xToHz, zoomView, type View } from "./freq";
 
+/** True when a click lands close in time and space to the previous click-tune (second half of a double-click). */
+export function isRepeatClick(prev: { t: number; x: number } | null, t: number, x: number, maxMs = 400, maxPx = 6): boolean {
+  return prev !== null && t - prev.t <= maxMs && Math.abs(x - prev.x) <= maxPx;
+}
+
 export interface PlotInteractionOptions {
   getView(): View;
   getLimit(): View;
@@ -18,6 +23,7 @@ export function attachPlotInteractions(el: HTMLElement, o: PlotInteractionOption
   let lastX = 0;
   let dragging = false;
   let tuningDrag = false;
+  let lastTune: { t: number; x: number } | null = null;
 
   const rect = () => el.getBoundingClientRect();
   const hzAt = (clientX: number) => {
@@ -57,8 +63,15 @@ export function attachPlotInteractions(el: HTMLElement, o: PlotInteractionOption
     else o.setView(panView(v, -dx * hzPerPx, o.getLimit()));
   };
   const onUp = (e: PointerEvent) => {
-    // detail >= 2 is the second click of a double-click: dblclick resets the view instead.
-    if (downX !== null && !dragging && e.detail < 2) o.tune(hzAt(e.clientX));
+    // PointerEvent.detail is 0 in Chromium, so detect the second click of a double-click by time and position.
+    // dblclick then resets the view instead of tuning twice.
+    if (downX !== null && !dragging) {
+      const t = performance.now();
+      if (!isRepeatClick(lastTune, t, e.clientX)) {
+        lastTune = { t, x: e.clientX };
+        o.tune(hzAt(e.clientX));
+      }
+    }
     downX = null;
     dragging = false;
   };
