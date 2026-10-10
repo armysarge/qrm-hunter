@@ -46,6 +46,7 @@ class SettingsStore:
         self.path = Path(path) if path else default_settings_path()
 
     def load(self) -> Settings:
+        """Never fails: a missing, locked or corrupt file gives defaults (with a logged warning)."""
         try:
             data = tomllib.loads(self.path.read_text(encoding="utf-8"))
             return Settings.model_validate(data)
@@ -53,8 +54,17 @@ class SettingsStore:
             return Settings()
         except (tomllib.TOMLDecodeError, ValidationError, UnicodeDecodeError) as exc:
             bad = self.path.with_name(self.path.name + ".bad")
-            log.warning("settings file %s is unreadable (%s); moved to %s, using defaults", self.path, exc, bad)
-            os.replace(self.path, bad)
+            try:
+                os.replace(self.path, bad)
+            except OSError as move_exc:  # e.g. Windows: the file is open in an editor or AV scanner
+                log.warning("settings file %s is invalid (%s) and could not be moved aside (%s); "
+                            "using defaults", self.path, exc, move_exc)
+            else:
+                log.warning("settings file %s is invalid (%s); moved to %s, using defaults",
+                            self.path, exc, bad)
+            return Settings()
+        except OSError as exc:  # PermissionError, sharing violation, I/O error
+            log.warning("cannot read settings file %s (%s); using defaults", self.path, exc)
             return Settings()
 
     def save(self, settings: Settings) -> None:

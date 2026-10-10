@@ -38,3 +38,34 @@ def test_save_creates_parent_directories(tmp_path):
     store = SettingsStore(tmp_path / "a" / "b" / "s.toml")
     store.save(Settings(theme="light"))
     assert store.load().theme == "light"
+
+
+def test_unreadable_file_falls_back_to_defaults(tmp_path, monkeypatch, caplog):
+    path = tmp_path / "s.toml"
+    path.write_text("region = 2\n", encoding="utf-8")
+
+    def locked(self, *a, **kw):
+        raise PermissionError(13, "The process cannot access the file", str(self))
+
+    monkeypatch.setattr(type(path), "read_text", locked)
+    with caplog.at_level("WARNING"):
+        assert SettingsStore(path).load() == Settings()
+    assert "cannot read settings file" in caplog.text
+    monkeypatch.undo()
+    assert path.read_text(encoding="utf-8") == "region = 2\n"  # left alone, not moved aside
+
+
+def test_corrupt_file_that_cannot_be_moved_aside_falls_back(tmp_path, monkeypatch, caplog):
+    import os
+
+    path = tmp_path / "s.toml"
+    path.write_text("region = [[[", encoding="utf-8")
+
+    def busy(src, dst):
+        raise PermissionError(32, "The process cannot access the file because it is being used", str(src))
+
+    monkeypatch.setattr(os, "replace", busy)
+    with caplog.at_level("WARNING"):
+        assert SettingsStore(path).load() == Settings()
+    assert "could not be moved aside" in caplog.text
+    assert path.exists() and not (tmp_path / "s.toml.bad").exists()
