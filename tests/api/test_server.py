@@ -165,3 +165,29 @@ def test_open_state_error_is_422(client):
                     json={"device_id": "synthetic", "config": {"mode": "CW", "bw_hz": 20000}})
     assert r.status_code == 422 and r.json()["detail"]
     assert client.get("/api/state").json()["running"] is False
+
+
+# --- final review fixes ------------------------------------------------------------------------
+
+
+def test_saved_frequency_is_restored_at_startup(tmp_path):
+    from qrm_hunter.config.settings import Settings
+
+    SettingsStore(tmp_path / "s.toml").save(Settings(last_tune_hz=14_200_000, last_device_id="synthetic"))
+    c, session, store = make_client(tmp_path)
+    with c:
+        state = c.get("/api/state").json()
+        assert state["tune_hz"] == 14_200_000 and not state["running"]
+        assert c.get("/api/settings").json()["last_device_id"] == "synthetic"
+        # Start without an explicit frequency comes up on the saved one
+        opened = c.post("/api/session/open", json={"device_id": "synthetic"}).json()
+        assert opened["running"] and opened["tune_hz"] == 14_200_000
+        assert opened["center_hz"] == 14_200_000 + opened["sample_rate"] / 4
+        c.post("/api/session/close")
+
+
+def test_invalid_saved_frequency_falls_back_to_default(tmp_path):
+    (tmp_path / "s.toml").write_text("last_tune_hz = -5\n", encoding="utf-8")
+    c, _, _ = make_client(tmp_path)
+    with c:
+        assert c.get("/api/state").json()["tune_hz"] == 7_100_000

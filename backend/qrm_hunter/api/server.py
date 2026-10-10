@@ -56,6 +56,19 @@ async def _pump(*coros) -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+def _restore_last_session(session: RadioSession, settings: Settings) -> None:
+    """Seed a stopped session with the last frequency from settings (spec 5.4: "last
+    device/frequency"; the last device is restored by the UI from settings.last_device_id).
+    While stopped this only merges and validates; open() recentres around tune_hz."""
+    if session.state.running:
+        return
+    tune = float(settings.last_tune_hz)
+    try:
+        session.update(StatePatch(tune_hz=tune, center_hz=tune + session.state.sample_rate / 4))
+    except StateError as exc:
+        log.warning("ignoring saved frequency %s Hz: %s", settings.last_tune_hz, exc)
+
+
 def create_app(session: RadioSession, store: SettingsStore, *, token: str | None = None,
                static_dir: Path | None = None,
                discover_fn: Callable[[], list[DeviceInfo]] = discover) -> FastAPI:
@@ -78,6 +91,7 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
 
     app = FastAPI(title="QRM Hunter", lifespan=lifespan)
     app.state.settings = store.load()
+    _restore_last_session(session, app.state.settings)
 
     def authorized(conn: HTTPConnection) -> bool:
         if token is None:
