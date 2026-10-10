@@ -2,6 +2,7 @@ import asyncio
 import threading
 import time
 
+import numpy as np
 import pytest
 
 from qrm_hunter.engine.session import RadioSession, StateError
@@ -454,3 +455,90 @@ def test_gain_change_keeps_generation_but_retune_bumps_it(session):
     assert session._gen == gen + 1
     session.update(StatePatch(sample_rate=1_024_000.0))
     assert session._gen == gen + 2
+
+
+# --- broadcast FM and RDS ----------------------------------------------------------------------
+
+
+def test_wfm_bandwidth_is_mode_aware(session):
+    session.open("synthetic", StatePatch(tune_hz=100_000_000.0))
+    s = session.update(StatePatch(mode="WFM"))
+    assert (s.mode, s.bw_hz) == ("WFM", 180_000.0)
+    assert session.update(StatePatch(bw_hz=150_000.0)).bw_hz == 150_000.0
+    for bad in (StatePatch(bw_hz=300_000.0), StatePatch(bw_hz=20_000.0), StatePatch(mode="USB", bw_hz=150_000.0)):
+        with pytest.raises(StateError, match="bw_hz must be between"):
+            session.update(bad)
+    assert session.state.bw_hz == 150_000.0
+    assert session.update(StatePatch(mode="FM")).bw_hz == 10_000.0  # back to the mode default
+
+
+def test_wfm_rejected_below_one_megasample():
+    from dataclasses import replace
+
+    from qrm_hunter.sdr.synthetic import SYNTHETIC_INFO
+
+    def slow(_id):
+        d = SyntheticDevice(realtime=False)
+        d.info = replace(SYNTHETIC_INFO, sample_rates=(250_000.0, 2_048_000.0))
+        return d
+
+    session = RadioSession(slow)
+    try:
+        session.open("synthetic", StatePatch(sample_rate=250_000.0, tune_hz=100_000_000.0))
+        with pytest.raises(StateError, match="Broadcast FM needs a sample rate of at least 1 MS/s"):
+            session.update(StatePatch(mode="WFM"))
+        assert session.state.mode == "AM"
+        with pytest.raises(StateError, match="at least 1 MS/s"):
+            session.open("synthetic", StatePatch(sample_rate=250_000.0, mode="WFM"))
+        s = session.update(StatePatch(sample_rate=2_048_000.0, mode="WFM"))
+        assert (s.mode, s.sample_rate) == ("WFM", 2_048_000.0)
+    finally:
+        session.close()
+
+
+def test_rds_events_are_published_on_change_and_reset_on_retune(session):
+    async def main():
+        sub = session.events.subscribe()
+        await asyncio.to_thread(session.open, "synthetic", StatePatch(tune_hz=100_000_000.0, mode="WFM"))
+        times = []
+        ev = await next_of(sub, lambda e: e["type"] == "rds" and (times.append(time.monotonic()) or True)
+                           and e["rds"]["ps"] == "QRM DEMO", timeout=8.0)
+        snapshot = session.rds
+        await asyncio.to_thread(session.update, StatePatch(tune_hz=100_100_000.0))
+        cleared = await next_of(sub, lambda e: e["type"] == "rds")
+        await asyncio.to_thread(session.update, StatePatch(mode="USB"))
+        return ev, snapshot, cleared, times
+
+    ev, snapshot, cleared, times = asyncio.run(main())
+    rds = ev["rds"]
+    assert (rds["pi"], rds["pty"], rds["tp"], rds["stereo"], rds["synced"]) == ("6201", 10, True, True, True)
+    assert snapshot == rds
+    assert cleared == {"type": "rds", "rds": None}  # a retune forgets the old station at once
+    gaps = np.diff(times)
+    assert np.all(gaps >= 0.19)  # at most 5 per second
+    assert session.rds is None  # not WFM any more
+
+
+def test_no_rds_outside_wfm(session):
+    async def main():
+        sub = session.events.subscribe()
+        await asyncio.to_thread(session.open, "synthetic", StatePatch(tune_hz=100_000_000.0, mode="FM"))
+        await asyncio.sleep(1.0)
+        events = []
+        while not sub.queue.empty():
+            events.append(sub.queue.get_nowait())
+        return events
+
+    assert not [e for e in asyncio.run(main()) if e["type"] == "rds"]
+    assert session.rds is None
+
+
+def test_region_sets_wfm_deemphasis_and_rds_pty_table(session):
+    session.open("synthetic", StatePatch(tune_hz=100_000_000.0, mode="WFM"))
+    assert session._demod.deemphasis_s == 50e-6
+    session.set_region(2)
+    assert session._demod.deemphasis_s == 75e-6
+    session.update(StatePatch(sample_rate=1_024_000.0))  # a new demodulator keeps the region's value
+    assert session._demod.deemphasis_s == 75e-6
+    session.set_region(1)
+    assert session._demod.deemphasis_s == 50e-6

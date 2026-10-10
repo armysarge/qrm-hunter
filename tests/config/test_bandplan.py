@@ -17,9 +17,16 @@ def test_every_region_has_the_ten_hf_bands_in_order(region):
 ])
 def test_vhf_uhf_bands_follow_hf_in_frequency_order(region, names):
     bands = bands_for_region(region)
-    assert [b.name for b in bands if b.group != "HF"] == names
+    assert [b.name for b in bands if b.group in ("VHF", "UHF")] == names
     assert [b.lo_hz for b in bands] == sorted(b.lo_hz for b in bands)
     assert band_at(145_500_000, region).name == "2m"
+
+
+@pytest.mark.parametrize("region,lo", [(1, 87_500_000), (2, 88_000_000), (3, 87_500_000)])
+def test_fm_broadcast_band_per_region(region, lo):
+    bc = [b for b in bands_for_region(region) if b.group == "BC"]
+    assert [(b.name, b.lo_hz, b.hi_hz) for b in bc] == [("FM BC", lo, 108_000_000)]
+    assert band_at(100_000_000, region).group == "BC"
 
 
 def test_region1_40m_edges():

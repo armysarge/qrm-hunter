@@ -11,14 +11,16 @@ from typing import Literal
 import numpy as np
 
 from .base import DeviceConfig, DeviceError, DeviceInfo, apply_limits
+from .rds_encoder import DemoStation
 
-SourceKind = Literal["cw", "smps_comb", "buzz", "ofdm", "impulses", "am_broadcast"]
+SourceKind = Literal["cw", "smps_comb", "buzz", "ofdm", "impulses", "am_broadcast", "wfm_broadcast"]
 
 
 @dataclass(frozen=True)
 class Source:
-    """One interference source. freq_hz is the carrier (cw/am), first line (comb),
-    centre (buzz) or lower edge (ofdm); impulses ignore it (they are wideband)."""
+    """One interference source. freq_hz is the carrier (cw/am/wfm), first line (comb),
+    centre (buzz) or lower edge (ofdm); impulses ignore it (they are wideband). A wfm_broadcast
+    source is a DemoStation (mono programme, pilot and RDS); its params go to DemoStation."""
 
     kind: SourceKind
     freq_hz: float
@@ -36,6 +38,7 @@ def demo_scene() -> list[Source]:
         Source("impulses", 0.0, -10.0, {"rate_hz": 100.0, "burst_len": 32}),
         Source("cw", 14_074_000.0, -55.0),
         Source("buzz", 14_200_000.0, -48.0, {"bw_hz": 300_000.0, "am_hz": 100.0}),
+        Source("wfm_broadcast", 100_000_000.0, -30.0),
     ]
 
 
@@ -69,6 +72,7 @@ class SyntheticDevice:
         self._paced = 0
         self._ofdm_cache: dict[tuple, np.ndarray] = {}
         self._phasors: dict[tuple, np.ndarray] = {}
+        self._stations: dict[int, DemoStation] = {}
 
     def open(self) -> None:
         self._open = True
@@ -139,6 +143,14 @@ class SyntheticDevice:
             tone = self._phasor(p.get("tone_hz", 1000.0), rate, n0, n).real
             env = 1 + np.float32(p.get("depth", 0.5)) * tone
             return (amp * env) * self._phasor(off, rate, n0, n)
+        if src.kind == "wfm_broadcast":
+            off = src.freq_hz - fc
+            if abs(off) >= half:
+                return None
+            station = self._stations.get(index)
+            if station is None:
+                station = self._stations[index] = DemoStation(**p)
+            return amp * station.iq(n0, n, rate, off)
         if src.kind == "smps_comb":
             return self._comb(src, n0, n, fc, rate, amp)
         if src.kind == "buzz":

@@ -1,4 +1,4 @@
-"""HF, VHF and UHF amateur band plans for IARU Regions 1, 2 and 3."""
+"""HF, VHF and UHF amateur band plans for IARU Regions 1, 2 and 3, plus the FM broadcast band."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ class Band:
     name: str
     lo_hz: int
     hi_hz: int
-    group: str = "HF"  # "HF", "VHF" or "UHF"
+    group: str = "HF"  # "HF", "VHF", "UHF" or "BC" (broadcast)
 
     @property
     def default_hz(self) -> int:
@@ -49,10 +49,20 @@ _VHF_UHF = {
 }
 
 
+# Not an amateur band: broadcast FM, for listening (WFM with RDS).
+_BROADCAST = {
+    1: [("FM BC", 87_500_000, 108_000_000, "BC")],
+    2: [("FM BC", 88_000_000, 108_000_000, "BC")],
+    3: [("FM BC", 87_500_000, 108_000_000, "BC")],
+}
+
+
 def bands_for_region(region: int) -> list[Band]:
+    """All bands for a region, in frequency order."""
     if region not in _LOWER:
         raise ValueError(f"unknown IARU region {region!r} (expected 1, 2 or 3)")
-    return [Band(*row) for row in _LOWER[region] + _UPPER + _VHF_UHF[region]]
+    rows = _LOWER[region] + _UPPER + _VHF_UHF[region] + _BROADCAST[region]
+    return sorted((Band(*row) for row in rows), key=lambda b: b.lo_hz)
 
 
 def band_at(hz: float, region: int) -> Band | None:

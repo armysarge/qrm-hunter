@@ -185,3 +185,31 @@ def test_generates_faster_than_real_time_on_40m():
         d.read(n)
         times.append(time.perf_counter() - t0)
     assert sorted(times)[len(times) // 2] < 0.5 * n / RATE
+
+
+def test_demo_scene_has_a_broadcast_station_at_100_mhz():
+    d = make()
+    d.configure(DeviceConfig(center_hz=100_500_000.0, sample_rate=RATE))
+    x = d.read(65_536)
+    s = spectrum_db(x)
+    f = (np.arange(x.size) - x.size // 2) * RATE / x.size
+    station = s[np.abs(f + 500_000.0) < 75_000.0].mean()
+    quiet = s[np.abs(f - 500_000.0) < 75_000.0].mean()
+    assert station - quiet > 10
+    d.configure(DeviceConfig(center_hz=110_000_000.0, sample_rate=RATE))
+    x = d.read(65_536)
+    assert np.std(spectrum_db(x)[1000:-1000]) < 8  # just noise (and impulses) far from the station
+
+
+@pytest.mark.performance
+def test_generates_faster_than_real_time_at_the_broadcast_station():
+    d = make()
+    d.configure(DeviceConfig(center_hz=100_512_000.0, sample_rate=RATE))
+    n = 32_768
+    d.read(n)
+    times = []
+    for _ in range(9):
+        t0 = time.perf_counter()
+        d.read(n)
+        times.append(time.perf_counter() - t0)
+    assert sorted(times)[len(times) // 2] < 0.5 * n / RATE

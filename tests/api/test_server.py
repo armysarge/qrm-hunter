@@ -462,3 +462,51 @@ def test_direct_sampling_is_ignored_not_rejected_by_devices_without_it(client):
     client.post("/api/session/open", json={"device_id": "synthetic"})
     r = client.patch("/api/state", json={"direct_sampling": "q"})
     assert r.status_code == 200 and r.json()["direct_sampling"] == "off"
+
+
+# --- broadcast FM and RDS ----------------------------------------------------------------------
+
+
+def wait_for_rds(client, timeout=8.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        rds = client.get("/api/rds").json()
+        if rds and rds["ps"] == "QRM DEMO":
+            return rds
+        time.sleep(0.1)
+    raise AssertionError("no RDS from the demo station")
+
+
+def test_rds_endpoint_and_events_on_subscribe(client):
+    assert client.get("/api/rds").json() is None
+    r = client.post("/api/session/open", json={"device_id": "synthetic",
+                                               "config": {"tune_hz": 100_000_000, "mode": "WFM"}})
+    assert r.status_code == 200 and r.json()["bw_hz"] == 180_000
+    rds = wait_for_rds(client)
+    assert rds["pi"] == "6201" and rds["pty_name"] == "Pop Music"
+    with client.websocket_connect("ws://127.0.0.1:7070/ws/events") as ws:
+        assert ws.receive_json()["type"] == "state"
+        ev = ws.receive_json()
+        assert ev["type"] == "rds" and ev["rds"]["ps"] == "QRM DEMO"
+    client.patch("/api/state", json={"mode": "FM"})
+    assert client.get("/api/rds").json() is None
+
+
+def test_region_setting_reaches_the_session(client):
+    assert client.session.region == 1
+    client.patch("/api/settings", json={"region": 2})
+    assert client.session.region == 2
+
+
+def test_wfm_patch_validation(client):
+    client.post("/api/session/open", json={"device_id": "synthetic", "config": {"tune_hz": 100_000_000}})
+    assert client.patch("/api/state", json={"mode": "WFM", "bw_hz": 400_000}).status_code == 422
+    assert client.patch("/api/state", json={"mode": "WFM", "bw_hz": 200_000}).json()["bw_hz"] == 200_000
+
+
+def test_wfm_memory(client):
+    body = {**MEMORY, "name": "QRM DEMO", "tune_hz": 100_000_000, "mode": "WFM", "bw_hz": 180_000}
+    r = client.post("/api/memories", json=body)
+    assert r.status_code == 201 and r.json()["mode"] == "WFM"
+    assert client.post("/api/memories", json={**body, "bw_hz": 2700}).status_code == 422
+    assert client.post("/api/memories", json={**MEMORY, "bw_hz": 180_000}).status_code == 422

@@ -11,7 +11,8 @@ from typing import Callable
 
 from pydantic import ValidationError
 
-from ..dsp.demod import DEFAULT_BW, Demodulator
+from ..dsp.demod import DEFAULT_BW, Demodulator, deemphasis_for
+from ..dsp.rds import RdsDecoder
 from ..dsp.spectrum import SpectrumProcessor
 from ..sdr.base import DeviceConfig, DeviceError, DeviceInfo, SdrDevice
 from ..sdr.discovery import create_device
@@ -24,6 +25,7 @@ SPAN_USABLE = 0.45  # fraction of the sample rate either side of centre usable f
 RING_SECONDS = 0.5
 JOIN_TIMEOUT = 2.0  # seconds to wait for a run's threads on close
 DEV_LOCK_TIMEOUT = 3.0  # seconds to wait for an in-progress device read/configure
+RDS_MIN_INTERVAL = 0.2  # seconds between published RDS updates (at most 5 per second)
 
 
 class StateError(ValueError):
@@ -83,6 +85,9 @@ class RadioSession:
         self._stats = Stats()
         self._spectrum: SpectrumProcessor | None = None
         self._demod: Demodulator | None = None
+        self._rds: RdsDecoder | None = None  # runs only while the mode is WFM
+        self._rds_snapshot: dict | None = None
+        self._region = 1
         self._block = 32768
         self._gen = 0
         self._seq = 0
@@ -110,6 +115,25 @@ class RadioSession:
     def state(self) -> RadioState:
         with self._lock:
             return self._state.model_copy()
+
+    @property
+    def rds(self) -> dict | None:
+        """The latest published RDS state (None when not in WFM or after a retune); lock-free."""
+        return self._rds_snapshot
+
+    @property
+    def region(self) -> int:
+        return self._region
+
+    def set_region(self, region: int) -> None:
+        """IARU region: picks the WFM de-emphasis (75 us in Region 2, else 50 us) and the RDS
+        programme type table (RBDS in Region 2)."""
+        with self._lock:
+            self._region = region
+            if self._demod is not None:
+                self._demod.set_deemphasis(deemphasis_for(region))
+            if self._rds is not None:
+                self._rds.set_region(region)
 
     @property
     def stats(self) -> Stats:
@@ -151,6 +175,7 @@ class RadioSession:
                 self._demod = demod
                 self._block = block
                 self._gen += 1
+                self._reset_rds()
             run.threads = [
                 threading.Thread(target=self._reader_loop, args=(run,), name="sdr-reader", daemon=True),
                 threading.Thread(target=self._dsp_loop, args=(run,), name="sdr-dsp", daemon=True),
@@ -168,6 +193,7 @@ class RadioSession:
                 # audio goes off with the radio (the UI tears its player down on stop); an
                 # explicit audio=true on the next open() is still honoured
                 self._state = self._state.model_copy(update={"running": False, "audio": False})
+                self._reset_rds()
             if run is not None:
                 run.stop.set()
                 for t in run.threads:
@@ -214,6 +240,8 @@ class RadioSession:
                         self._gen += 1
                 self._apply_dsp(old, new, plan)
             self._state = new
+            if (new.mode, new.tune_hz, new.sample_rate) != (old.mode, old.tune_hz, old.sample_rate):
+                self._reset_rds()  # another station or mode: start decoding afresh
         self._publish_state()
         return self.state
 
@@ -265,11 +293,11 @@ class RadioSession:
                                     "gain_db": cfg.gain_db, "ppm": cfg.ppm,
                                     "direct_sampling": cfg.direct_sampling})
 
-    @staticmethod
-    def _build_dsp(s: RadioState) -> tuple[SpectrumProcessor, Demodulator]:
+    def _build_dsp(self, s: RadioState) -> tuple[SpectrumProcessor, Demodulator]:
         try:
             return (SpectrumProcessor(s.fft_size, s.avg_alpha),
-                    Demodulator(s.sample_rate, s.mode, s.bw_hz, s.tune_hz - s.center_hz))
+                    Demodulator(s.sample_rate, s.mode, s.bw_hz, s.tune_hz - s.center_hz,
+                                deemphasis_s=deemphasis_for(self._region)))
         except ValueError as exc:
             raise StateError(str(exc)) from exc
 
@@ -311,6 +339,19 @@ class RadioSession:
     def _publish_state(self) -> None:
         self.events.publish({"type": "state", "state": self.state.model_dump()})
 
+    def _reset_rds(self) -> None:
+        """Call with the lock held. A fresh RDS decoder while running in WFM, otherwise none; the
+        published RDS state is forgotten (and its absence announced). Under the lock, so a DSP
+        thread update from the old decoder cannot arrive after the announcement."""
+        demod = self._demod
+        if self._state.running and self._state.mode == "WFM" and demod is not None and demod.mode == "WFM":
+            self._rds = RdsDecoder(demod.mpx_rate, self._region)
+        else:
+            self._rds = None
+        if self._rds_snapshot is not None:
+            self._rds_snapshot = None
+            self.events.publish({"type": "rds", "rds": None})
+
     # --- threads ----------------------------------------------------------------------------
 
     def _reader_loop(self, run: _Run) -> None:
@@ -346,6 +387,7 @@ class RadioSession:
             if current:
                 self._run = None
                 self._state = self._state.model_copy(update={"running": False, "audio": False})
+                self._reset_rds()
         if not current:  # a newer open()/close() already superseded this run
             return
         self.events.publish({"type": "error", "code": "device_lost", "message": str(exc)})
@@ -359,6 +401,7 @@ class RadioSession:
         last_stats = clock()
         frames = 0
         pending = None  # (gen, center_hz, sample_rate, spectrum_db) captured when produced
+        last_rds = -math.inf
         while not run.stop.is_set():
             try:
                 gen, block = run.ring.get(timeout=0.2)
@@ -372,8 +415,19 @@ class RadioSession:
                     continue
                 st = self._state
                 db = self._spectrum.process(block)
-                pcm = self._demod.process(block) if st.audio else None
+                rds = self._rds
+                # WFM demodulates even without audio: the RDS decoder needs the MPX.
+                pcm = self._demod.process(block) if st.audio or rds is not None else None
                 rate = self._demod.out_rate
+                if rds is not None:
+                    rds.process(self._demod.mpx)
+                    if rds.changed and clock() - last_rds >= RDS_MIN_INTERVAL:
+                        rds.changed = False
+                        last_rds = clock()
+                        self._rds_snapshot = rds.state.to_dict()
+                        self.events.publish({"type": "rds", "rds": self._rds_snapshot})
+                if not st.audio:
+                    pcm = None
             now = clock()
             if db is not None:
                 pending = (gen, st.center_hz, st.sample_rate, db)

@@ -193,6 +193,7 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
     app = FastAPI(title="QRM Hunter", lifespan=lifespan)
     app.add_middleware(RequestGuard, loopback_only=token is None)
     app.state.settings = store.load()
+    session.set_region(app.state.settings.region)
     app.state.memories = memory_store.load()
     _restore_last_session(session, app.state.settings)
 
@@ -266,6 +267,10 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
         except DeviceError as exc:
             raise HTTPException(409, str(exc)) from exc
 
+    @api.get("/rds")
+    def get_rds() -> dict | None:
+        return session.rds
+
     @api.get("/bandplan")
     def bandplan() -> dict:
         region = app.state.settings.region
@@ -279,8 +284,9 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
 
     @api.patch("/settings")
     def patch_settings(patch: SettingsPatch) -> dict:
-        return save_settings(**patch.model_dump(exclude_unset=True, exclude_none=True)).model_dump(
-            exclude={"token"})
+        settings = save_settings(**patch.model_dump(exclude_unset=True, exclude_none=True))
+        session.set_region(settings.region)  # WFM de-emphasis and the RDS programme type table
+        return settings.model_dump(exclude={"token"})
 
     @api.get("/memories")
     def list_memories() -> list[dict]:
@@ -412,6 +418,9 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
 
         async def send() -> None:
             await ws.send_json({"type": "state", "state": session.snapshot.model_dump()})
+            rds = session.rds
+            if rds is not None:
+                await ws.send_json({"type": "rds", "rds": rds})
             while True:
                 await ws.send_json(await sub.queue.get())
 
