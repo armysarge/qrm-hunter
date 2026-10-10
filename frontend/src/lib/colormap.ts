@@ -21,11 +21,24 @@ function viridis(x: number): [number, number, number] {
   return [0, 1, 2].map((k) => (a[k] + (b[k] - a[k]) * f) / 255) as [number, number, number];
 }
 
+/** Turbo tuned for a waterfall: skip turbo's dark-maroon top end, and fade the bottom toward
+ *  black so the noise floor reads dark and strong signals read bright red/orange. */
+const TURBO_LO = 0.05;
+const TURBO_HI = 0.84; // the polynomial turbo is already dark maroon (r≈171) by 0.92
+const FADE = 0.15;
+function waterfallTurbo(x: number): [number, number, number] {
+  const c = turbo(TURBO_LO + x * (TURBO_HI - TURBO_LO));
+  if (x >= FADE) return c;
+  const k = x / FADE; // 0 → black, 1 → plain turbo
+  const w = 0.15 + 0.85 * k * k;
+  return [c[0] * w, c[1] * w, c[2] * w];
+}
+
 export function buildLut(name: ColormapName): Uint8Array {
   const lut = new Uint8Array(256 * 4);
   for (let i = 0; i < 256; i++) {
     const x = i / 255;
-    const [r, g, b] = name === "turbo" ? turbo(x) : name === "viridis" ? viridis(x) : [x, x, x];
+    const [r, g, b] = name === "turbo" ? waterfallTurbo(x) : name === "viridis" ? viridis(x) : [x, x, x];
     lut.set([r, g, b].map((c) => Math.round(Math.min(1, Math.max(0, c)) * 255)), i * 4);
     lut[i * 4 + 3] = 255;
   }

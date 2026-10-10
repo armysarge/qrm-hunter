@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  clampView, formatDigits, formatHz, formatTick, hzToX, niceTicks, panView, parseFreqInput, passband,
+  autoRange, clampView, formatDigits, formatHz, formatTick, hzToX, niceTicks, panView, parseFreqInput, passband,
   resampleToView, snapHz, xToHz, zoomView,
 } from "./freq";
 
@@ -68,5 +68,29 @@ describe("formatting and parsing", () => {
     expect(passband(7_000_000, "USB", 2700)).toEqual([7_000_000, 7_002_700]);
     expect(passband(7_000_000, "LSB", 2700)).toEqual([6_997_300, 7_000_000]);
     expect(passband(7_000_000, "AM", 6000)).toEqual([6_997_000, 7_003_000]);
+  });
+});
+
+describe("autoRange", () => {
+  it("puts the 20th-percentile floor 6 dB above db_min and 50 dB below db_max", () => {
+    // dB range -120..-20 → 100 dB over 255 steps; a floor of bin 102 is -80 dB
+    const bins = new Uint8Array(1000).fill(102);
+    for (let i = 0; i < 50; i++) bins[i * 20] = 250; // strong carriers don't move the floor
+    expect(autoRange(bins, -120, -20)).toEqual({ db_min: -86, db_max: -30 });
+  });
+  it("uses the low percentile, not the minimum", () => {
+    const bins = new Uint8Array(100);
+    for (let i = 0; i < 100; i++) bins[i] = i; // percentile 20 → bin 19
+    const r = autoRange(bins, -100, 155)!; // 1 dB per bin step
+    expect(r).toEqual({ db_min: -100 + 19 - 6, db_max: -100 + 19 + 50 });
+  });
+  it("rounds to whole dB", () => {
+    const r = autoRange(new Uint8Array(10).fill(100), -120, -20)!;
+    expect(Number.isInteger(r.db_min) && Number.isInteger(r.db_max)).toBe(true);
+    expect(r.db_max - r.db_min).toBe(56);
+  });
+  it("returns null for empty input or a bad range", () => {
+    expect(autoRange(new Uint8Array(0), -120, -20)).toBeNull();
+    expect(autoRange(new Uint8Array(4), -20, -20)).toBeNull();
   });
 });

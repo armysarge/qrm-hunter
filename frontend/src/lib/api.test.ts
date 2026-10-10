@@ -48,3 +48,11 @@ describe("api errors", () => {
     expect((await errorOf(api("/api/x"))).message).toBe("HTTP 400");
   });
 });
+
+describe("api errors (null detail)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it("treats detail: null as missing", async () => {
+    respond(503, "Service Unavailable", JSON.stringify({ detail: null }));
+    expect((await errorOf(api("/api/x"))).message).toBe("HTTP 503 Service Unavailable");
+  });
+});

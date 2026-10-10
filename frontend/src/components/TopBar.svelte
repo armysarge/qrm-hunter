@@ -86,7 +86,7 @@
   </div>
 
   <div class="group audio">
-    <button class="listen" class:on={app.audioOn} aria-pressed={app.audioOn} disabled={!running} onclick={toggleAudio}>
+    <button class="listen" class:on={app.audioOn} aria-pressed={app.audioOn} disabled={!running || app.audioBusy} onclick={toggleAudio}>
       <span class="material-symbols-rounded" aria-hidden="true">{app.audioOn ? "volume_off" : "volume_up"}</span>
       {app.audioOn ? "Mute" : "Listen"}
     </button>
@@ -138,6 +138,7 @@
   }
   @media (max-width: 760px) {
     .top { display: flex; flex-wrap: wrap; }
+    .hero { order: -1; flex-basis: 100%; justify-content: flex-start; }
   }
 
   .brand { gap: 8px; height: 52px; padding-right: 4px; }

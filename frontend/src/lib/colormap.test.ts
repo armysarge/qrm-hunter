@@ -14,9 +14,22 @@ describe("buildLut", () => {
     expect(Array.from(lut.slice(0, 3))).toEqual([0, 0, 0]);
     expect(Array.from(lut.slice(1020, 1023))).toEqual([255, 255, 255]);
   });
-  it("turbo starts dark and ends red", () => {
+  it("turbo starts near-black and ends bright red/orange (never dark maroon)", () => {
     const lut = buildLut("turbo");
-    expect(lut[0] + lut[1] + lut[2]).toBeLessThan(200);
-    expect(lut[1020]).toBeGreaterThan(lut[1022]);
+    expect(lut[0] + lut[1] + lut[2]).toBeLessThan(120);
+    const [r, g, b] = [lut[1020], lut[1021], lut[1022]];
+    expect(r).toBeGreaterThan(200);
+    expect(r + g).toBeGreaterThan(250);
+    expect(r).toBeGreaterThan(b);
+  });
+  it("turbo luminance never decreases over the low quarter (noise floor stays dark)", () => {
+    const lut = buildLut("turbo");
+    const lum = (i: number) => 0.2126 * lut[i * 4] + 0.7152 * lut[i * 4 + 1] + 0.0722 * lut[i * 4 + 2];
+    for (let i = 1; i < 64; i++) expect(lum(i)).toBeGreaterThanOrEqual(lum(i - 1));
+  });
+  it("viridis runs dark purple to yellow", () => {
+    const lut = buildLut("viridis");
+    expect(lut[0] + lut[1] + lut[2]).toBeLessThan(160);
+    expect(lut[1020] + lut[1021]).toBeGreaterThan(450);
   });
 });

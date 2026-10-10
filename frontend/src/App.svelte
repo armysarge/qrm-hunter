@@ -6,7 +6,7 @@
   import Spectrum from "./components/Spectrum.svelte";
   import Waterfall from "./components/Waterfall.svelte";
   import StatusBar from "./components/StatusBar.svelte";
-  import { app, fullSpan, refreshDevices, setRadio } from "./lib/store.svelte";
+  import { app, fullSpan, noteFrame, reconcileAudio, refreshDevices, setRadio } from "./lib/store.svelte";
   import { getBandplan, getSettings, getState } from "./lib/api";
   import { ReconnectingSocket } from "./lib/ws";
   import { parseSpectrumFrame } from "./lib/protocol";
@@ -30,7 +30,9 @@
     onOpen: () => sendView(),
     onMessage: (ev) => {
       try {
-        frameBus.emit(parseSpectrumFrame(ev.data as ArrayBuffer));
+        const frame = parseSpectrumFrame(ev.data as ArrayBuffer);
+        noteFrame(frame);
+        frameBus.emit(frame);
       } catch (e) {
         console.warn(e);
       }
@@ -89,6 +91,13 @@
     document.documentElement.dataset.theme = app.settings?.theme ?? "dark";
   });
 
+  // If the radio stops server-side (device lost, closed elsewhere), drop local audio too.
+  $effect(() => {
+    void app.radio?.running;
+    void app.audioOn;
+    untrack(reconcileAudio);
+  });
+
   // Band plan depends on the region setting
   $effect(() => {
     const region = app.settings?.region;
@@ -96,6 +105,7 @@
   });
 
   function onKey(e: KeyboardEvent) {
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
     if ((e.target as HTMLElement).closest("input, select, textarea")) return;
     const r = app.radio;
     if (!r?.running) return;

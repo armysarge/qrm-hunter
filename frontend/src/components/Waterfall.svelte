@@ -93,6 +93,10 @@
   .wrap { position: absolute; inset: 0; overflow: hidden; background: var(--md-surface-container-lowest); }
   canvas { display: block; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
   .pb { position: absolute; top: 0; bottom: 0; background: var(--accent-soft); pointer-events: none; }
-  .tune { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--md-primary); opacity: 0.9; pointer-events: none; }
+  /* 2 px line with a 1 px dark halo so it stays visible over any colormap colour */
+  .tune {
+    position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; pointer-events: none;
+    background: var(--md-primary); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.7);
+  }
   .err { position: absolute; inset: 0; margin: auto; height: fit-content; text-align: center; color: var(--md-error); }
 </style>

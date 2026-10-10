@@ -1,7 +1,8 @@
 import { closeSession, getState, listDevices, openSession, patchSettings, patchState } from "./api";
 import { AudioPlayer } from "./audio";
 import { ReconnectingSocket } from "./ws";
-import { passband, snapHz, type View } from "./freq";
+import { autoRange, passband, snapHz, type View } from "./freq";
+import type { SpectrumFrame } from "./protocol";
 import type { PlotInteractionOptions } from "./interact";
 import type { Band, DeviceInfo, RadioState, Settings, SettingsPatch, StatePatch, Stats } from "./types";
 
@@ -20,6 +21,7 @@ export const app = $state({
   stepHz: 1000,
   volume: 0.8,
   audioOn: false,
+  audioBusy: false,
 });
 
 export function fullSpan(r: RadioState): View {
@@ -102,41 +104,83 @@ export async function startStop(): Promise<void> {
       app.radio = await closeSession();
     } else {
       const tune = app.radio?.tune_hz ?? app.settings?.last_tune_hz ?? 7_100_000;
+      lastFrame = null;
       app.radio = await openSession(app.selectedDevice, { tune_hz: tune });
       app.error = null;
+      if (app.radio?.running) autoRangeCountdown = AUTO_RANGE_AFTER_FRAMES;
     }
   } catch (e) {
     fail(e);
   }
 }
 
+/** Tear down local audio (socket, AudioContext) without telling the server. */
+export function stopAudioLocal(): void {
+  audioSocket?.stop();
+  audioSocket = null;
+  player.stop();
+  app.audioOn = false;
+}
+
+/** The radio stopped (device lost, closed elsewhere): audio can't continue, so drop it locally. */
+export function reconcileAudio(): void {
+  if (app.audioOn && !app.radio?.running) stopAudioLocal();
+}
+
 export async function toggleAudio(): Promise<void> {
-  if (app.audioOn) {
-    audioSocket?.stop();
-    audioSocket = null;
-    player.stop();
-    app.audioOn = false;
-    if (app.radio?.running) await setRadio({ audio: false });
-    return;
-  }
+  if (app.audioBusy) return; // a second click while starting/stopping must not double up
+  app.audioBusy = true;
   try {
-    await player.start();
-    player.setGain(app.volume);
-    audioSocket = new ReconnectingSocket("/ws/audio", {
-      onMessage: (ev) => {
-        if (typeof ev.data === "string") {
-          const msg = JSON.parse(ev.data);
-          if (msg.type === "format") player.setRate(msg.rate);
-        } else player.push(ev.data as ArrayBuffer);
-      },
-    });
-    audioSocket.start();
-    app.audioOn = true;
-    await setRadio({ audio: true });
-  } catch (e) {
-    fail(e);
+    if (app.audioOn) {
+      stopAudioLocal();
+      if (app.radio?.running) await setRadio({ audio: false });
+      return;
+    }
+    try {
+      await player.start();
+      if (!app.radio?.running) {
+        player.stop(); // radio stopped while the AudioContext was starting
+        return;
+      }
+      player.setGain(app.volume);
+      audioSocket = new ReconnectingSocket("/ws/audio", {
+        onMessage: (ev) => {
+          if (typeof ev.data === "string") {
+            const msg = JSON.parse(ev.data);
+            if (msg.type === "format") player.setRate(msg.rate);
+          } else player.push(ev.data as ArrayBuffer);
+        },
+      });
+      audioSocket.start();
+      app.audioOn = true;
+      await setRadio({ audio: true });
+    } catch (e) {
+      stopAudioLocal();
+      fail(e);
+    }
+  } finally {
+    app.audioBusy = false;
   }
 }
+
+// --- Auto range: set the display dB range from the latest spectrum frame ---
+const AUTO_RANGE_AFTER_FRAMES = 10; // let the averaging settle (~0.4 s) before the automatic run
+let lastFrame: SpectrumFrame | null = null;
+let autoRangeCountdown = 0;
+
+/** Called for every spectrum frame (non-reactive). Triggers the one automatic auto-range after Start. */
+export function noteFrame(f: SpectrumFrame): void {
+  lastFrame = f;
+  if (autoRangeCountdown > 0 && --autoRangeCountdown === 0) void applyAutoRange();
+}
+
+export async function applyAutoRange(): Promise<void> {
+  const f = lastFrame;
+  if (!f || !app.radio?.running) return;
+  const r = autoRange(f.bins, f.dbMin, f.dbMax);
+  if (r) await setRadio(r);
+}
+
 
 export async function saveSettings(patch: SettingsPatch): Promise<void> {
   try {

@@ -100,3 +100,13 @@ export function passband(tuneHz: number, mode: Mode, bwHz: number): [number, num
   if (mode === "LSB") return [tuneHz - bwHz, tuneHz];
   return [tuneHz - bwHz / 2, tuneHz + bwHz / 2];
 }
+
+/** Display range from a spectrum frame: noise floor = 20th percentile of the bins (converted back
+ *  to dB with the frame's own dbMin/dbMax), shown from floor-6 dB to floor+50 dB. */
+export function autoRange(bins: Uint8Array, dbMin: number, dbMax: number, pct = 0.2): { db_min: number; db_max: number } | null {
+  if (!bins.length || !(dbMax > dbMin)) return null;
+  const sorted = Uint8Array.from(bins).sort();
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor(pct * (sorted.length - 1))));
+  const floor = dbMin + (sorted[idx] / 255) * (dbMax - dbMin);
+  return { db_min: Math.round(floor - 6), db_max: Math.round(floor + 50) };
+}

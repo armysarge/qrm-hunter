@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { app, saveSettings, setRadio } from "../lib/store.svelte";
+  import { app, applyAutoRange, saveSettings, setRadio } from "../lib/store.svelte";
   import type { ColormapName } from "../lib/types";
 
   const FFT_SIZES = [2048, 4096, 8192, 16384, 32768, 65536];
@@ -36,6 +36,10 @@
       <input class="db num" type="number" step="5" value={r?.db_max ?? -20} aria-label="Display ceiling (dB)"
         onchange={(e) => setRadio({ db_max: Number(e.currentTarget.value) })} />
     </label>
+    <button class="icon dense-icon" aria-label="Auto range" title="Auto range: fit the dB scale to the noise floor"
+      disabled={!r?.running} onclick={applyAutoRange}>
+      <span class="material-symbols-rounded" aria-hidden="true">auto_fix_high</span>
+    </button>
     <label class="ctl">Colours
       <select aria-label="Waterfall colours" value={app.settings?.colormap ?? "turbo"} onchange={(e) => saveSettings({ colormap: e.currentTarget.value as ColormapName })}>
         <option value="turbo">Turbo</option><option value="viridis">Viridis</option><option value="grey">Grey</option>
@@ -83,6 +87,7 @@
   .db { width: 64px; }
 
   .toggle-chip.dense { height: 28px; font-size: 12px; padding: 0 12px 0 8px; gap: 6px; }
-  .theme { width: 32px; height: 32px; }
+  .theme, .dense-icon { width: 32px; height: 32px; }
+  .dense-icon .material-symbols-rounded { font-size: 18px; }
   .theme .material-symbols-rounded { font-size: 18px; }
 </style>

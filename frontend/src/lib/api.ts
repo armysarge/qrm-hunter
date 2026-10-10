@@ -21,7 +21,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     try {
       const body = await res.json();
       if (typeof body?.detail === "string") detail = body.detail;
-      else if (body?.detail !== undefined) detail = JSON.stringify(body.detail);
+      else if (body?.detail != null) detail = JSON.stringify(body.detail);
     } catch {
       /* not JSON */
     }
