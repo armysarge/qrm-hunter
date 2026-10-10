@@ -149,3 +149,39 @@ def test_am_broadcast_sidebands_follow_depth(depth):
     expected_db = 20 * np.log10(depth / 2)  # each sideband is depth/2 of the carrier
     for k in (32, n - 32):
         assert abs(20 * np.log10(X[k] / X[0]) - expected_db) < 0.5
+
+
+@pytest.mark.parametrize("kind,freq,params", [
+    ("cw", 7_074_000.0, {}),
+    ("am_broadcast", 7_245_000.0, {"tone_hz": 1000.0, "depth": 0.5}),
+    ("smps_comb", 150_000.0, {"spacing_hz": 68_000.0, "am_hz": 100.0, "am_depth": 0.6}),
+    ("ofdm", 7_300_000.0, {"bw_hz": 400_000.0, "spacing_hz": 4312.5}),
+])
+def test_tones_are_phase_continuous_across_reads(kind, freq, params):
+    # cached unit phasors rotated by a per-block start phase must equal one long read
+    src = Source(kind, freq, -20.0, params)
+
+    def run(sizes):
+        d = make(sources=[src], noise_db=-300.0)
+        d.configure(DeviceConfig(center_hz=7_200_000.0, sample_rate=RATE))
+        return np.concatenate([d.read(n) for n in sizes])
+
+    whole = run([65_536])
+    split = run([10_000, 22_768, 32_768])
+    assert np.max(np.abs(whole)) > 0.01
+    assert np.allclose(whole, split, rtol=0, atol=1e-4)
+
+
+@pytest.mark.performance
+def test_generates_faster_than_real_time_on_40m():
+    # the default demo tune (7.1 MHz, centre 7.612 MHz at 2.048 MS/s) renders every demo source
+    d = make()
+    d.configure(DeviceConfig(center_hz=7_612_000.0, sample_rate=RATE))
+    n = 32_768
+    d.read(n)  # warm the phasor/OFDM caches
+    times = []
+    for _ in range(9):
+        t0 = time.perf_counter()
+        d.read(n)
+        times.append(time.perf_counter() - t0)
+    assert sorted(times)[len(times) // 2] < 0.5 * n / RATE
