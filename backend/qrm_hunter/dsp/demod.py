@@ -1,4 +1,4 @@
-"""Stateful AM/SSB/CW demodulator: NCO -> multistage FIR decimation -> channel filter -> detector -> AGC."""
+"""Stateful AM/SSB/CW/FM demodulator: NCO -> multistage FIR decimation -> channel filter -> detector -> AGC."""
 
 from __future__ import annotations
 
@@ -8,12 +8,15 @@ from typing import Literal
 import numpy as np
 from scipy.signal import firwin, lfilter, lfilter_zi, upfirdn
 
-Mode = Literal["AM", "USB", "LSB", "CW"]
-DEFAULT_BW: dict[str, float] = {"AM": 6000.0, "USB": 2700.0, "LSB": 2700.0, "CW": 500.0}
+Mode = Literal["AM", "USB", "LSB", "CW", "FM"]
+DEFAULT_BW: dict[str, float] = {"AM": 6000.0, "USB": 2700.0, "LSB": 2700.0, "CW": 500.0,
+                                 "FM": 10_000.0}
 CW_PITCH_HZ = 700.0
 TARGET_AUDIO_RATE = 12_000.0
 _CHANNEL_TAPS = 129
 _AGC_TARGET = 0.3
+FM_DEVIATION_HZ = 2500.0  # amateur narrowband FM; full-scale audio at this deviation
+FM_AUDIO_CUTOFF_HZ = 3000.0  # 1-pole de-emphasis / hiss filter after the discriminator
 
 
 def _prime_factors(n: int) -> list[int]:
@@ -104,6 +107,8 @@ class Demodulator:
         self._gain = 1.0
         self._dc_zi = np.zeros(1)
         self._dc_primed = False
+        self._fm_prev = np.complex64(0)
+        self._fm_lp_zi = np.zeros(1)
         self.offset_hz = 0.0
         self.set_offset(offset_hz)
         self.set_mode(mode, bw_hz)
@@ -117,7 +122,7 @@ class Demodulator:
         if mode not in DEFAULT_BW:
             raise ValueError(f"unknown mode {mode!r}")
         bw = float(DEFAULT_BW[mode] if bw_hz is None else bw_hz)
-        if mode == "AM":
+        if mode in ("AM", "FM"):
             lo, hi = -bw / 2, bw / 2
         elif mode == "USB":
             lo, hi = 100.0, bw + 100.0
@@ -161,11 +166,27 @@ class Demodulator:
                 self._dc_zi = lfilter_zi([1.0, -1.0], [1.0, -0.995]) * float(np.mean(env))
                 self._dc_primed = True
             audio, self._dc_zi = lfilter([1.0, -1.0], [1.0, -0.995], env, zi=self._dc_zi)
+        elif self.mode == "FM":
+            audio = self._fm_detect(y)
         else:
             audio = y.real
-        if self.agc_enabled:
+        if self.agc_enabled and self.mode != "FM":  # FM audio level is set by the deviation
             audio = self._agc(np.asarray(audio, np.float64))
         return np.clip(np.rint(np.asarray(audio) * 32767), -32768, 32767).astype(np.int16)
+
+    def _fm_detect(self, y: np.ndarray) -> np.ndarray:
+        """Quadrature discriminator (phase step between samples) -> de-emphasis -> DC block."""
+        prev = np.concatenate(([self._fm_prev], y[:-1]))
+        self._fm_prev = np.complex64(y[-1])
+        freq = np.angle(y * np.conj(prev)) * (self.out_rate / (2 * np.pi * FM_DEVIATION_HZ))
+        a = 1.0 - math.exp(-2 * math.pi * FM_AUDIO_CUTOFF_HZ / self.out_rate)
+        lp, self._fm_lp_zi = lfilter([a], [1.0, a - 1.0], freq, zi=self._fm_lp_zi)
+        # The DC blocker removes the constant term a mistuned carrier produces.
+        if not self._dc_primed:
+            self._dc_zi = lfilter_zi([1.0, -1.0], [1.0, -0.995]) * float(np.mean(lp))
+            self._dc_primed = True
+        audio, self._dc_zi = lfilter([1.0, -1.0], [1.0, -0.995], lp, zi=self._dc_zi)
+        return audio * _AGC_TARGET
 
     def _agc(self, a: np.ndarray) -> np.ndarray:
         out = np.empty_like(a)

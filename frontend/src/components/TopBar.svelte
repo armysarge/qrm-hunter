@@ -4,7 +4,7 @@
   import { BW_OPTIONS, STEP_OPTIONS } from "../lib/freq";
   import type { DirectSampling, Mode } from "../lib/types";
 
-  const MODES: Mode[] = ["AM", "USB", "LSB", "CW"];
+  const MODES: Mode[] = ["AM", "USB", "LSB", "CW", "FM"];
   const running = $derived(!!app.radio?.running);
   const device = $derived(app.devices.find((d) => d.id === (running ? app.radio?.device_id : app.selectedDevice)));
   const agc = $derived(app.radio?.gain_db === null);

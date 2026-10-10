@@ -1,4 +1,4 @@
-export type Mode = "AM" | "USB" | "LSB" | "CW";
+export type Mode = "AM" | "USB" | "LSB" | "CW" | "FM";
 export type DirectSampling = "off" | "i" | "q";
 
 export interface DeviceInfo {

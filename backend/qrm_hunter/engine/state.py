@@ -8,7 +8,7 @@ from typing import Literal
 import numpy as np
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-Mode = Literal["AM", "USB", "LSB", "CW"]
+Mode = Literal["AM", "USB", "LSB", "CW", "FM"]
 DirectSampling = Literal["off", "i", "q"]
 
 

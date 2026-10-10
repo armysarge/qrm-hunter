@@ -151,3 +151,32 @@ def test_demodulator_runs_faster_than_real_time_at_3p2_msps():
     for b in bl:
         d.process(b)
     assert time.perf_counter() - t0 < 0.5
+
+
+def fm_signal(rate, carrier_hz, tone_hz, dev_hz, seconds=0.5):
+    t = np.arange(int(rate * seconds)) / rate
+    phase = 2 * np.pi * carrier_hz * t + (dev_hz / tone_hz) * np.sin(2 * np.pi * tone_hz * t)
+    return (0.1 * np.exp(1j * phase)).astype(np.complex64)
+
+
+def test_fm_recovers_tone_and_level_tracks_deviation():
+    def run(dev):
+        d = Demodulator(RATE, "FM", offset_hz=40_000.0, agc=False)
+        x = fm_signal(RATE, 40_000.0, 1000.0, dev)
+        a = np.concatenate([d.process(b) for b in np.array_split(x, 37)])
+        return d, a[len(a) // 3:]
+
+    d, a = run(2500.0)
+    assert d.bw_hz == 10_000.0
+    assert abs(dominant_hz(a, d.out_rate) - 1000.0) < 10
+    assert tone_snr_db(a, d.out_rate, 1000.0) > 25
+    rms = lambda v: np.sqrt(np.mean(v.astype(np.float64) ** 2))
+    assert 1.6 < rms(a) / rms(run(1250.0)[1]) < 2.4  # discriminator output is linear in deviation
+
+
+def test_fm_mistuned_carrier_gives_no_dc():
+    d = Demodulator(RATE, "FM", offset_hz=40_000.0, agc=False)
+    t = np.arange(int(RATE * 0.5)) / RATE
+    x = (0.1 * np.exp(2j * np.pi * 41_000.0 * t)).astype(np.complex64)  # 1 kHz off, unmodulated
+    a = np.concatenate([d.process(b) for b in np.array_split(x, 10)]).astype(np.float64)
+    assert abs(np.mean(a[len(a) // 2:])) < 300
