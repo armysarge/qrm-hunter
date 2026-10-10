@@ -17,13 +17,15 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (init.body) headers.set("Content-Type", "application/json");
   const res = await fetch(path, { ...init, headers });
   if (!res.ok) {
-    let detail = res.statusText;
+    let detail = "";
     try {
       const body = await res.json();
-      detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+      if (typeof body?.detail === "string") detail = body.detail;
+      else if (body?.detail !== undefined) detail = JSON.stringify(body.detail);
     } catch {
       /* not JSON */
     }
+    if (!detail.trim()) detail = res.statusText ? `HTTP ${res.status} ${res.statusText}` : `HTTP ${res.status}`;
     throw new ApiError(res.status, detail);
   }
   return (await res.json()) as T;

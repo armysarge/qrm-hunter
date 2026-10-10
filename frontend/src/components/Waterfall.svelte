@@ -90,9 +90,9 @@
 </div>
 
 <style>
-  .wrap { position: absolute; inset: 0; overflow: hidden; background: #000; }
+  .wrap { position: absolute; inset: 0; overflow: hidden; background: var(--md-surface-container-lowest); }
   canvas { display: block; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
   .pb { position: absolute; top: 0; bottom: 0; background: var(--accent-soft); pointer-events: none; }
-  .tune { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--accent); opacity: 0.8; pointer-events: none; }
-  .err { position: absolute; inset: 0; margin: auto; height: fit-content; text-align: center; color: var(--err); }
+  .tune { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--md-primary); opacity: 0.9; pointer-events: none; }
+  .err { position: absolute; inset: 0; margin: auto; height: fit-content; text-align: center; color: var(--md-error); }
 </style>

@@ -22,7 +22,7 @@
   function readColors() {
     const cs = getComputedStyle(document.documentElement);
     const v = (n: string) => cs.getPropertyValue(n).trim();
-    return { bg: v("--panel"), grid: v("--grid"), text: v("--muted"), accent: v("--accent"),
+    return { bg: v("--md-surface-container-low"), grid: v("--grid"), text: v("--muted"), accent: v("--md-primary"),
       accentSoft: v("--accent-soft"), trace: v("--trace"), band: v("--band"), line: v("--line") };
   }
 

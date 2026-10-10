@@ -1,4 +1,143 @@
 <script lang="ts">
+  import { onMount, untrack } from "svelte";
+  import TopBar from "./components/TopBar.svelte";
+  import BandBar from "./components/BandBar.svelte";
+  import ErrorBanner from "./components/ErrorBanner.svelte";
+  import Spectrum from "./components/Spectrum.svelte";
+  import Waterfall from "./components/Waterfall.svelte";
+  import StatusBar from "./components/StatusBar.svelte";
+  import { app, fullSpan, refreshDevices, setRadio } from "./lib/store.svelte";
+  import { getBandplan, getSettings, getState } from "./lib/api";
+  import { ReconnectingSocket } from "./lib/ws";
+  import { parseSpectrumFrame } from "./lib/protocol";
+  import { frameBus } from "./lib/framebus";
+  import { clampView, snapHz } from "./lib/freq";
+  import type { ServerEvent } from "./lib/types";
+
+  let statusH = $state(40);
+
+  const events = new ReconnectingSocket("/ws/events", {
+    onStatus: (ok) => (app.connected = ok),
+    onMessage: (ev) => {
+      const msg = JSON.parse(ev.data as string) as ServerEvent;
+      if (msg.type === "state") app.radio = msg.state;
+      else if (msg.type === "error") app.error = msg.message;
+      else if (msg.type === "stats") app.stats = msg.stats;
+    },
+  });
+
+  const spectrum = new ReconnectingSocket("/ws/spectrum", {
+    onOpen: () => sendView(),
+    onMessage: (ev) => {
+      try {
+        frameBus.emit(parseSpectrumFrame(ev.data as ArrayBuffer));
+      } catch (e) {
+        console.warn(e);
+      }
+    },
+  });
+
+  function sendView() {
+    const v = app.view;
+    if (v.hiHz > v.loHz) spectrum.send(JSON.stringify({ width: app.plotWidth, f_lo: v.loHz, f_hi: v.hiHz }));
+  }
+
+  onMount(() => {
+    (async () => {
+      try {
+        const [settings, plan, state] = await Promise.all([getSettings(), getBandplan(), getState()]);
+        app.settings = settings;
+        app.bands = plan.bands;
+        app.radio = state;
+        await refreshDevices();
+        const last = settings.last_device_id;
+        if (last && app.devices.some((d) => d.id === last)) app.selectedDevice = last;
+      } catch (e) {
+        app.error = (e as Error).message;
+      }
+    })();
+    events.start();
+    spectrum.start();
+    return () => {
+      events.stop();
+      spectrum.stop();
+    };
+  });
+
+  // Keep the visible range inside the SDR span; jump to full span if the tuned frequency left the view.
+  $effect(() => {
+    const r = app.radio;
+    if (!r) return;
+    const limit = fullSpan(r);
+    const tune = r.tune_hz;
+    untrack(() => {
+      const cur = app.view;
+      let next = cur.hiHz > cur.loHz ? clampView(cur, limit) : limit;
+      if (tune < next.loHz || tune > next.hiHz) next = limit;
+      if (next.loHz !== cur.loHz || next.hiHz !== cur.hiHz) app.view = next;
+    });
+  });
+
+  $effect(() => {
+    void app.view.loHz;
+    void app.view.hiHz;
+    void app.plotWidth;
+    sendView();
+  });
+
+  $effect(() => {
+    document.documentElement.dataset.theme = app.settings?.theme ?? "dark";
+  });
+
+  // Band plan depends on the region setting
+  $effect(() => {
+    const region = app.settings?.region;
+    if (region) untrack(() => getBandplan().then((p) => (app.bands = p.bands)).catch(() => {}));
+  });
+
+  function onKey(e: KeyboardEvent) {
+    if ((e.target as HTMLElement).closest("input, select, textarea")) return;
+    const r = app.radio;
+    if (!r?.running) return;
+    if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+      e.preventDefault();
+      const dir = e.key === "ArrowRight" ? 1 : -1;
+      setRadio({ tune_hz: snapHz(r.tune_hz + dir * app.stepHz, app.stepHz) });
+    }
+  }
 </script>
 
-<main>QRM Hunter</main>
+<svelte:window onkeydown={onKey} />
+
+<div class="shell" style:--status-h="{statusH}px">
+  <TopBar />
+  <BandBar />
+  <main class="card">
+    <section class="spectrum" aria-label="Spectrum"><Spectrum /></section>
+    <section class="waterfall" aria-label="Waterfall"><Waterfall /></section>
+  </main>
+  <div class="statusbar" bind:clientHeight={statusH}><StatusBar /></div>
+  <ErrorBanner />
+</div>
+
+<style>
+  .shell {
+    display: grid;
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr);
+    height: 100vh;
+    background: var(--md-surface);
+  }
+  /* Spectrum and waterfall share one card; the plots themselves are never animated. */
+  .card {
+    display: grid;
+    grid-template-rows: 3fr 7fr;
+    min-height: 0;
+    margin: 8px;
+    border-radius: var(--md-shape-lg);
+    background: var(--md-surface-container-low);
+    overflow: hidden;
+  }
+  .spectrum, .waterfall { position: relative; min-height: 0; }
+  .spectrum { border-bottom: 1px solid var(--md-outline-variant); }
+</style>

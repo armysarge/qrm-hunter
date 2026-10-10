@@ -1,7 +1,9 @@
-import { getState, patchState } from "./api";
+import { closeSession, getState, listDevices, openSession, patchSettings, patchState } from "./api";
+import { AudioPlayer } from "./audio";
+import { ReconnectingSocket } from "./ws";
 import { passband, snapHz, type View } from "./freq";
 import type { PlotInteractionOptions } from "./interact";
-import type { Band, DeviceInfo, RadioState, Settings, StatePatch, Stats } from "./types";
+import type { Band, DeviceInfo, RadioState, Settings, SettingsPatch, StatePatch, Stats } from "./types";
 
 export const app = $state({
   devices: [] as DeviceInfo[],
@@ -75,4 +77,71 @@ export function plotOptions(onCursor?: (x: number | null, y: number | null) => v
     getPassband: () => (app.radio ? passband(app.radio.tune_hz, app.radio.mode, app.radio.bw_hz) : null),
     onCursor,
   };
+}
+
+export const player = new AudioPlayer();
+let audioSocket: ReconnectingSocket | null = null;
+
+const fail = (e: unknown) => {
+  app.error = (e as Error).message;
+};
+
+export async function refreshDevices(): Promise<void> {
+  try {
+    app.devices = await listDevices();
+    if (!app.devices.some((d) => d.id === app.selectedDevice)) app.selectedDevice = app.devices[0]?.id ?? "";
+  } catch (e) {
+    fail(e);
+  }
+}
+
+export async function startStop(): Promise<void> {
+  try {
+    if (app.radio?.running) {
+      if (app.audioOn) await toggleAudio();
+      app.radio = await closeSession();
+    } else {
+      const tune = app.radio?.tune_hz ?? app.settings?.last_tune_hz ?? 7_100_000;
+      app.radio = await openSession(app.selectedDevice, { tune_hz: tune });
+      app.error = null;
+    }
+  } catch (e) {
+    fail(e);
+  }
+}
+
+export async function toggleAudio(): Promise<void> {
+  if (app.audioOn) {
+    audioSocket?.stop();
+    audioSocket = null;
+    player.stop();
+    app.audioOn = false;
+    if (app.radio?.running) await setRadio({ audio: false });
+    return;
+  }
+  try {
+    await player.start();
+    player.setGain(app.volume);
+    audioSocket = new ReconnectingSocket("/ws/audio", {
+      onMessage: (ev) => {
+        if (typeof ev.data === "string") {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "format") player.setRate(msg.rate);
+        } else player.push(ev.data as ArrayBuffer);
+      },
+    });
+    audioSocket.start();
+    app.audioOn = true;
+    await setRadio({ audio: true });
+  } catch (e) {
+    fail(e);
+  }
+}
+
+export async function saveSettings(patch: SettingsPatch): Promise<void> {
+  try {
+    app.settings = await patchSettings(patch);
+  } catch (e) {
+    fail(e);
+  }
 }

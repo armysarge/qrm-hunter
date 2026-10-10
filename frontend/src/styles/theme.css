@@ -134,3 +134,42 @@ input[type="checkbox"] { accent-color: var(--md-primary); width: 18px; height: 1
 .material-symbols-rounded { font-size: 20px; line-height: 1; font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 20; }
 .num { font-family: var(--sans); font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
 .label-sm { font-size: 11px; line-height: 16px; font-weight: 500; letter-spacing: 0.05em; }
+
+/* Field motion */
+select, input[type="number"], input[type="text"] {
+  transition: border-color 150ms var(--md-motion), background-color 150ms var(--md-motion);
+}
+input[type="range"] { cursor: pointer; }
+input[type="range"]:disabled { opacity: 0.38; cursor: default; }
+
+/* Outlined field with a notched .label-sm label sitting on the top border (M3 outlined text field).
+   --field-bg must match the surface the field sits on so the notch hides the border. */
+.field { position: relative; display: inline-flex; flex-direction: column; }
+.field > .lbl {
+  position: absolute; top: -7px; left: 8px; z-index: 1; padding: 0 4px;
+  background: var(--field-bg, var(--md-surface-container)); color: var(--md-on-surface-variant);
+  pointer-events: none; transition: color 150ms var(--md-motion);
+}
+.field:focus-within > .lbl { color: var(--md-primary); }
+
+/* Toggle chip: a checkbox rendered as an M3 filter chip (outlined, secondary-container when on). */
+.toggle-chip {
+  position: relative; display: inline-flex; align-items: center; gap: 8px; flex: none;
+  height: 32px; padding: 0 16px 0 8px; border-radius: var(--md-shape-sm);
+  border: 1px solid var(--md-outline-variant); color: var(--md-on-surface-variant);
+  font-size: 14px; font-weight: 500; cursor: pointer; user-select: none; overflow: hidden;
+  transition: background-color 200ms var(--md-motion), border-color 200ms var(--md-motion), color 200ms var(--md-motion);
+}
+.toggle-chip::after {
+  content: ""; position: absolute; inset: 0; background: currentColor; opacity: 0;
+  transition: opacity 150ms var(--md-motion); pointer-events: none;
+}
+.toggle-chip:hover:not(:has(input:disabled))::after { opacity: 0.08; }
+.toggle-chip:active:not(:has(input:disabled))::after { opacity: 0.12; }
+.toggle-chip:has(input:checked) {
+  border-color: transparent; background: var(--md-secondary-container); color: var(--md-on-secondary-container);
+}
+.toggle-chip:has(input:disabled) { opacity: 0.38; cursor: default; }
+.toggle-chip:has(input:focus-visible) { outline: 3px solid var(--md-primary); outline-offset: 2px; }
+.toggle-chip input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; pointer-events: none; }
+.toggle-chip .material-symbols-rounded { font-size: 18px; }

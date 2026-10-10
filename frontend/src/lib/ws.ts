@@ -18,6 +18,7 @@ export class ReconnectingSocket {
   private ws: WebSocket | null = null;
   private attempt = 0;
   private stopped = true;
+  private connected = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private path: string, private handlers: SocketHandlers) {}
@@ -31,8 +32,12 @@ export class ReconnectingSocket {
   stop(): void {
     this.stopped = true;
     clearTimeout(this.timer);
+    const wasConnected = this.connected;
+    this.connected = false;
     this.ws?.close();
     this.ws = null;
+    // onclose ignores sockets we've already dropped, so report the disconnect here.
+    if (wasConnected) this.handlers.onStatus?.(false);
   }
 
   send(data: string): void {
@@ -44,14 +49,18 @@ export class ReconnectingSocket {
     ws.binaryType = "arraybuffer";
     this.ws = ws;
     ws.onopen = () => {
+      if (this.ws !== ws) return;
       this.attempt = 0;
+      this.connected = true;
       this.handlers.onStatus?.(true);
       this.handlers.onOpen?.();
     };
     ws.onmessage = (ev) => this.handlers.onMessage(ev);
     ws.onclose = () => {
       if (this.ws !== ws) return;
-      this.handlers.onStatus?.(false);
+      const wasConnected = this.connected;
+      this.connected = false;
+      if (wasConnected) this.handlers.onStatus?.(false);
       if (this.stopped) return;
       this.timer = setTimeout(() => this.connect(), backoffMs(this.attempt++));
     };

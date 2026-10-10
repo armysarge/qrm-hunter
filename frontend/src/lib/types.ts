@@ -44,7 +44,7 @@ export interface Settings {
   mains_hz: 50 | 60 | "auto";
   theme: "dark" | "light";
   colormap: ColormapName;
-  last_device_id?: string;
+  last_device_id?: string | null;
   last_tune_hz: number;
 }
 
