@@ -36,7 +36,9 @@ const json = (method: string, body: unknown): RequestInit => ({ method, body: JS
 export const listDevices = () => api<DeviceInfo[]>("/api/devices");
 export const openSession = (deviceId: string, config?: StatePatch) =>
   api<RadioState>("/api/session/open", json("POST", { device_id: deviceId, config }));
-export const closeSession = () => api<RadioState>("/api/session/close", { method: "POST" });
+// Every state-changing request carries a JSON body: the server refuses non-JSON POST/PATCH
+// (cross-site "simple requests") with 415.
+export const closeSession = () => api<RadioState>("/api/session/close", json("POST", {}));
 export const getState = () => api<RadioState>("/api/state");
 export const patchState = (patch: StatePatch) => api<RadioState>("/api/state", json("PATCH", patch));
 export const getBandplan = () => api<{ region: number; bands: Band[] }>("/api/bandplan");

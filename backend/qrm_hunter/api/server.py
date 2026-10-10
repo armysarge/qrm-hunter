@@ -10,13 +10,17 @@ import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, WebSocket
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.datastructures import Headers
 from starlette.requests import HTTPConnection
+from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.websockets import WebSocket as StarletteWebSocket
 
 from ..config.bandplan import bands_for_region
 from ..config.settings import Settings, SettingsPatch, SettingsStore
@@ -40,6 +44,83 @@ npm run build</pre></body>"""
 class OpenRequest(BaseModel):
     device_id: str
     config: StatePatch | None = None
+
+
+LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
+UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def host_name(host: str) -> str | None:
+    """The name part of a Host header ("[::1]:7070" -> "::1"), or None if it is malformed."""
+    h = host.strip().lower()
+    if h.startswith("["):
+        end = h.find("]")
+        if end < 0:
+            return None
+        name, rest = h[1:end], h[end + 1:]
+        if rest and not (rest[0] == ":" and rest[1:].isdigit()):
+            return None
+        return name
+    name, sep, port = h.partition(":")
+    if sep and not port.isdigit():
+        return None
+    return name or None
+
+
+def same_origin(origin: str, host: str) -> bool:
+    """True if an Origin header names the same host:port the request was sent to."""
+    try:
+        parts = urlsplit(origin.strip())
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and bool(parts.netloc) and         parts.netloc.lower() == host.strip().lower()
+
+
+class RequestGuard:
+    """Cross-site protections for an API that may run without a token on loopback.
+
+    - Without a token, only Host names 127.0.0.1, localhost and [::1] (any port, so the Vite
+      dev proxy on :5173 works) are served. This defeats DNS rebinding.
+    - A WebSocket carrying an Origin header must come from the page's own origin (Origin
+      host:port == Host). Browsers always send Origin and do not apply CORS to WebSockets;
+      non-browser clients that send no Origin are allowed.
+    - State-changing /api requests must be Content-Type: application/json. A cross-site page
+      can only send that after a CORS preflight, which this server never grants, so "simple"
+      cross-site POSTs (CSRF) are refused.
+    """
+
+    def __init__(self, app: ASGIApp, *, loopback_only: bool) -> None:
+        self.app = app
+        self.loopback_only = loopback_only
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        kind = scope["type"]
+        if kind not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+        headers = Headers(scope=scope)
+        host = headers.get("host", "")
+        if self.loopback_only and host_name(host) not in LOOPBACK_NAMES:
+            await self._reject(scope, receive, send, 403, "host not allowed")
+            return
+        if kind == "websocket":
+            origin = headers.get("origin")
+            if origin is not None and not same_origin(origin, host):
+                await self._reject(scope, receive, send, 403, "cross-origin WebSocket refused")
+                return
+        elif scope["method"] in UNSAFE_METHODS and scope["path"].startswith("/api/"):
+            ctype = headers.get("content-type", "").split(";")[0].strip().lower()
+            if ctype != "application/json":
+                await self._reject(scope, receive, send, 415, "Content-Type must be application/json")
+                return
+        await self.app(scope, receive, send)
+
+    @staticmethod
+    async def _reject(scope: Scope, receive: Receive, send: Send, status: int, detail: str) -> None:
+        if scope["type"] == "websocket":
+            await StarletteWebSocket(scope, receive, send).close(code=4403, reason=detail)
+        else:
+            await JSONResponse({"detail": detail}, status_code=status)(scope, receive, send)
 
 
 async def _pump(*coros) -> None:
@@ -90,6 +171,7 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
             await run_in_threadpool(lambda: save_settings(last_tune_hz=int(session.snapshot.tune_hz)))
 
     app = FastAPI(title="QRM Hunter", lifespan=lifespan)
+    app.add_middleware(RequestGuard, loopback_only=token is None)
     app.state.settings = store.load()
     _restore_last_session(session, app.state.settings)
 

@@ -23,7 +23,7 @@ def make_client(tmp_path, token=None, static_dir=None):
     session = RadioSession(factory)
     store = SettingsStore(tmp_path / "s.toml")
     app = create_app(session, store, token=token, static_dir=static_dir, discover_fn=lambda: [SYNTHETIC_INFO])
-    return TestClient(app), session, store
+    return TestClient(app, base_url="http://127.0.0.1:7070"), session, store
 
 
 @pytest.fixture
@@ -43,7 +43,7 @@ def test_open_patch_close(client):
     assert r.status_code == 200 and r.json()["running"] and r.json()["tune_hz"] == 7_074_000
     assert client.patch("/api/state", json={"mode": "USB"}).json()["bw_hz"] == 2700
     assert client.get("/api/state").json()["mode"] == "USB"
-    assert client.post("/api/session/close").json()["running"] is False
+    assert client.post("/api/session/close", json={}).json()["running"] is False
     assert client.store.load().last_device_id == "synthetic"
 
 
@@ -68,7 +68,7 @@ def test_unknown_field_is_422(client):
 
 def test_spectrum_websocket_honours_view(client):
     client.post("/api/session/open", json={"device_id": "synthetic"})
-    with client.websocket_connect("/ws/spectrum") as ws:
+    with client.websocket_connect("ws://127.0.0.1:7070/ws/spectrum") as ws:
         ws.send_text(json.dumps({"width": 512}))
         for _ in range(30):
             frame = decode_spectrum_frame(ws.receive_bytes())
@@ -78,14 +78,14 @@ def test_spectrum_websocket_honours_view(client):
 
 
 def test_events_websocket_starts_with_state(client):
-    with client.websocket_connect("/ws/events") as ws:
+    with client.websocket_connect("ws://127.0.0.1:7070/ws/events") as ws:
         ev = ws.receive_json()
         assert ev["type"] == "state" and "tune_hz" in ev["state"]
 
 
 def test_audio_websocket_sends_format_then_pcm(client):
     client.post("/api/session/open", json={"device_id": "synthetic", "config": {"audio": True, "tune_hz": 7_245_000}})
-    with client.websocket_connect("/ws/audio") as ws:
+    with client.websocket_connect("ws://127.0.0.1:7070/ws/audio") as ws:
         fmt = ws.receive_json()
         assert fmt["type"] == "format" and fmt["format"] == "s16le" and 10_000 < fmt["rate"] < 14_000
         assert len(ws.receive_bytes()) % 2 == 0
@@ -93,7 +93,7 @@ def test_audio_websocket_sends_format_then_pcm(client):
 
 def test_disconnecting_client_leaves_radio_running(client):
     client.post("/api/session/open", json={"device_id": "synthetic"})
-    with client.websocket_connect("/ws/spectrum") as ws:
+    with client.websocket_connect("ws://127.0.0.1:7070/ws/spectrum") as ws:
         ws.receive_bytes()
     deadline = time.monotonic() + 2
     while client.session.spectrum.subscriber_count and time.monotonic() < deadline:
@@ -124,9 +124,9 @@ def test_token_is_enforced(tmp_path):
         assert c.get("/api/state?token=s3cret").status_code == 200
         assert c.get("/api/state", headers={"Authorization": "Bearer s3cret"}).status_code == 200
         with pytest.raises(WebSocketDisconnect):
-            with c.websocket_connect("/ws/events") as ws:
+            with c.websocket_connect("ws://127.0.0.1:7070/ws/events") as ws:
                 ws.receive_json()
-        with c.websocket_connect("/ws/events?token=s3cret") as ws:
+        with c.websocket_connect("ws://127.0.0.1:7070/ws/events?token=s3cret") as ws:
             assert ws.receive_json()["type"] == "state"
 
 
@@ -183,7 +183,7 @@ def test_saved_frequency_is_restored_at_startup(tmp_path):
         opened = c.post("/api/session/open", json={"device_id": "synthetic"}).json()
         assert opened["running"] and opened["tune_hz"] == 14_200_000
         assert opened["center_hz"] == 14_200_000 + opened["sample_rate"] / 4
-        c.post("/api/session/close")
+        c.post("/api/session/close", json={})
 
 
 def test_invalid_saved_frequency_falls_back_to_default(tmp_path):
@@ -191,3 +191,90 @@ def test_invalid_saved_frequency_falls_back_to_default(tmp_path):
     c, _, _ = make_client(tmp_path)
     with c:
         assert c.get("/api/state").json()["tune_hz"] == 7_100_000
+
+
+# --- I3: cross-site protections ------------------------------------------------------------------
+
+WS = "ws://127.0.0.1:7070"
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1:7070", "localhost:5173", "[::1]:7070", "LOCALHOST", "127.0.0.1"])
+def test_loopback_host_names_are_served(client, host):
+    assert client.get("/api/state", headers={"Host": host}).status_code == 200
+
+
+@pytest.mark.parametrize("host", ["rebind.evil.example", "rebind.evil.example:7070", "127.0.0.1.evil.example",
+                                  "localhost:abc", "[::1]x", "192.168.1.5:7070", ""])
+def test_foreign_host_is_refused_without_token(client, host):
+    r = client.post("/api/session/open", json={"device_id": "synthetic"}, headers={"Host": host})
+    assert r.status_code == 403
+    assert client.session.state.running is False
+    assert client.get("/", headers={"Host": host}).status_code == 403
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(f"{WS}/ws/events", headers={"Host": host}) as ws:
+            ws.receive_json()
+    assert exc.value.code == 4403
+
+
+def test_token_mode_serves_any_host(tmp_path):
+    c, _, _ = make_client(tmp_path, token="s3cret")
+    with c:
+        r = c.get("/api/state?token=s3cret", headers={"Host": "192.168.1.5:7070"})
+        assert r.status_code == 200
+        r = c.post("/api/session/close", json={}, headers={"Host": "pi.local:7070", "Authorization": "Bearer s3cret"})
+        assert r.status_code == 200
+        with c.websocket_connect("ws://pi.local:7070/ws/events?token=s3cret",
+                                 headers={"Origin": "http://pi.local:7070"}) as ws:
+            assert ws.receive_json()["type"] == "state"
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with c.websocket_connect("ws://pi.local:7070/ws/events?token=s3cret",
+                                     headers={"Origin": "https://evil.example"}) as ws:
+                ws.receive_json()
+        assert exc.value.code == 4403
+
+
+@pytest.mark.parametrize("path", ["/ws/events", "/ws/audio", "/ws/spectrum"])
+@pytest.mark.parametrize("origin", ["https://evil.example", "http://localhost:7070", "null", "http://127.0.0.1:8080"])
+def test_cross_origin_websocket_is_refused(client, path, origin):
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(f"{WS}{path}", headers={"Origin": origin}) as ws:
+            ws.receive_bytes()
+    assert exc.value.code == 4403
+
+
+def test_same_origin_and_originless_websockets_are_allowed(client):
+    with client.websocket_connect(f"{WS}/ws/events", headers={"Origin": "http://127.0.0.1:7070"}) as ws:
+        assert ws.receive_json()["type"] == "state"
+    with client.websocket_connect(f"{WS}/ws/events") as ws:  # no Origin: a non-browser client
+        assert ws.receive_json()["type"] == "state"
+    # the Vite dev proxy forwards the page's Host (localhost:5173) along with its Origin
+    with client.websocket_connect("ws://localhost:5173/ws/events",
+                                  headers={"Origin": "http://localhost:5173"}) as ws:
+        assert ws.receive_json()["type"] == "state"
+
+
+@pytest.mark.parametrize("ctype", [None, "text/plain", "application/x-www-form-urlencoded", "multipart/form-data"])
+def test_state_changing_requests_need_json_content_type(client, ctype):
+    client.post("/api/session/open", json={"device_id": "synthetic"})
+    headers = {"Origin": "https://evil.example"}
+    if ctype:
+        headers["Content-Type"] = ctype
+    r = client.post("/api/session/close", headers=headers)  # a CORS "simple request"
+    assert r.status_code == 415
+    assert client.session.state.running is True
+    r = client.patch("/api/state", content=b'{"mode":"USB"}', headers=headers)
+    assert r.status_code == 415
+    assert client.post("/api/session/close", json={}).json()["running"] is False
+
+
+def test_json_content_type_with_charset_is_accepted(client):
+    r = client.patch("/api/state", content=b'{"mode":"USB"}',
+                     headers={"Content-Type": "application/json; charset=utf-8"})
+    assert r.status_code == 200 and r.json()["mode"] == "USB"
+
+
+def test_cors_preflight_is_not_granted(client):
+    r = client.options("/api/session/close", headers={
+        "Origin": "https://evil.example", "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "content-type"})
+    assert "access-control-allow-origin" not in {k.lower() for k in r.headers}

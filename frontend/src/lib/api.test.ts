@@ -56,3 +56,23 @@ describe("api errors (null detail)", () => {
     expect((await errorOf(api("/api/x"))).message).toBe("HTTP 503 Service Unavailable");
   });
 });
+
+describe("state-changing requests", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("send Content-Type: application/json, including close with no parameters", async () => {
+    const fetchMock = vi.fn(async (_path: string, _init?: RequestInit) => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { closeSession, openSession, patchState, patchSettings } = await import("./api");
+    await closeSession();
+    await openSession("synthetic", { tune_hz: 7_100_000 });
+    await patchState({ mode: "USB" });
+    await patchSettings({ theme: "light" });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(["POST", "PATCH"]).toContain(init?.method);
+      expect(new Headers(init?.headers).get("Content-Type")).toBe("application/json");
+      expect(typeof init?.body).toBe("string");
+    }
+  });
+});
