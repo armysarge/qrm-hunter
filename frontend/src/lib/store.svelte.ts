@@ -1,4 +1,4 @@
-import { patchState } from "./api";
+import { getState, patchState } from "./api";
 import { passband, snapHz, type View } from "./freq";
 import type { PlotInteractionOptions } from "./interact";
 import type { Band, DeviceInfo, RadioState, Settings, StatePatch, Stats } from "./types";
@@ -37,12 +37,19 @@ export async function setRadio(patch: StatePatch): Promise<void> {
     while (Object.keys(pending).length) {
       const next = pending;
       pending = {};
-      app.radio = await patchState(next);
+      const res = await patchState(next);
+      // Newer optimistic edits made while this request was in flight win over the stale response.
+      app.radio = Object.keys(pending).length ? { ...res, ...pending } : res;
     }
     app.error = null;
   } catch (e) {
     pending = {};
     app.error = (e as Error).message;
+    try {
+      app.radio = await getState();
+    } catch {
+      // keep the original error; the refetch failure adds nothing actionable
+    }
   } finally {
     inflight = false;
   }

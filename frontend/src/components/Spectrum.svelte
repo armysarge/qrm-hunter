@@ -15,7 +15,11 @@
   let cursor: { x: number; y: number } | null = null;
   let dirty = true;
 
+  let colorCache: ReturnType<typeof readColors> | null = null;
   function colors() {
+    return (colorCache ??= readColors());
+  }
+  function readColors() {
     const cs = getComputedStyle(document.documentElement);
     const v = (n: string) => cs.getPropertyValue(n).trim();
     return { bg: v("--panel"), grid: v("--grid"), text: v("--muted"), accent: v("--accent"),
@@ -163,7 +167,9 @@
 
   $effect(() => {
     // redraw when anything drawn from reactive state changes
-    void app.view.loHz; void app.view.hiHz; void app.bands.length; void app.settings?.theme;
+    void app.view.loHz; void app.view.hiHz; void app.bands.length;
+    void app.settings?.theme;
+    colorCache = null;
     void app.radio?.tune_hz; void app.radio?.bw_hz; void app.radio?.mode;
     if (!app.peakHold) peak = null;
     dirty = true;

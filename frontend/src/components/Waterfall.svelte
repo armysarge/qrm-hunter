@@ -30,13 +30,20 @@
       return;
     }
     const r = renderer;
-    const ro = new ResizeObserver(() => {
+    let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+    const applySize = () => {
       const dpr = devicePixelRatio || 1;
       canvas.width = Math.min(4096, Math.max(16, Math.round(wrap.clientWidth * dpr)));
       canvas.height = Math.max(16, Math.round(wrap.clientHeight * dpr));
       r.resize(canvas.width, canvas.height);
       app.plotWidth = r.width;
       dirty = true;
+    };
+    applySize();
+    // Debounced: recreating the texture wipes the history, so wait for the drag to settle.
+    const ro = new ResizeObserver(() => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(applySize, 150);
     });
     ro.observe(wrap);
     const off = frameBus.on((f) => {
@@ -55,6 +62,7 @@
     raf = requestAnimationFrame(loop);
     return () => {
       cancelAnimationFrame(raf);
+      clearTimeout(resizeTimer);
       off();
       detach();
       ro.disconnect();

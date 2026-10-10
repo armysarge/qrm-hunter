@@ -27,7 +27,11 @@ export function attachPlotInteractions(el: HTMLElement, o: PlotInteractionOption
 
   const onWheel = (e: WheelEvent) => {
     e.preventDefault();
-    const factor = e.deltaY > 0 ? 1.25 : 0.8;
+    if (e.deltaY === 0) return;
+    // Normalise lines/pages to pixels, then clamp so trackpads do not zoom wildly.
+    const px = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1);
+    const mag = Math.min(Math.abs(px) / 100, 1) * 0.25 + 0.05;
+    const factor = px > 0 ? 1 + mag : 1 / (1 + mag);
     o.setView(zoomView(o.getView(), hzAt(e.clientX), factor, o.getLimit()));
   };
   const onDown = (e: PointerEvent) => {
@@ -53,9 +57,15 @@ export function attachPlotInteractions(el: HTMLElement, o: PlotInteractionOption
     else o.setView(panView(v, -dx * hzPerPx, o.getLimit()));
   };
   const onUp = (e: PointerEvent) => {
-    if (downX !== null && !dragging) o.tune(hzAt(e.clientX));
+    // detail >= 2 is the second click of a double-click: dblclick resets the view instead.
+    if (downX !== null && !dragging && e.detail < 2) o.tune(hzAt(e.clientX));
     downX = null;
     dragging = false;
+  };
+  const onCancel = () => {
+    downX = null;
+    dragging = false;
+    tuningDrag = false;
   };
   const onLeave = () => o.onCursor?.(null, null);
   const onDbl = () => o.resetView();
@@ -64,6 +74,8 @@ export function attachPlotInteractions(el: HTMLElement, o: PlotInteractionOption
   el.addEventListener("pointerdown", onDown);
   el.addEventListener("pointermove", onMove);
   el.addEventListener("pointerup", onUp);
+  el.addEventListener("pointercancel", onCancel);
+  el.addEventListener("lostpointercapture", onCancel);
   el.addEventListener("pointerleave", onLeave);
   el.addEventListener("dblclick", onDbl);
   return () => {
@@ -71,6 +83,8 @@ export function attachPlotInteractions(el: HTMLElement, o: PlotInteractionOption
     el.removeEventListener("pointerdown", onDown);
     el.removeEventListener("pointermove", onMove);
     el.removeEventListener("pointerup", onUp);
+    el.removeEventListener("pointercancel", onCancel);
+    el.removeEventListener("lostpointercapture", onCancel);
     el.removeEventListener("pointerleave", onLeave);
     el.removeEventListener("dblclick", onDbl);
   };
