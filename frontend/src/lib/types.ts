@@ -1,4 +1,4 @@
-export type Mode = "AM" | "USB" | "LSB" | "CW" | "FM";
+export type Mode = "AM" | "USB" | "LSB" | "CW" | "FM" | "WFM";
 export type DirectSampling = "off" | "i" | "q";
 
 export interface DeviceInfo {
@@ -35,7 +35,7 @@ export type StatePatch = Partial<Omit<RadioState, "device_id" | "running">>;
 
 export interface Stats { dropped: number; overflows: number; frame_rate: number; clients: number; }
 
-export type BandGroup = "HF" | "VHF" | "UHF";
+export type BandGroup = "HF" | "VHF" | "UHF" | "BC";
 export interface Band { name: string; lo_hz: number; hi_hz: number; default_hz: number; group: BandGroup; }
 
 export type ColormapName = "turbo" | "viridis" | "grey";
@@ -65,8 +65,26 @@ export interface Memory extends MemoryFields { id: string; created: string; }
 
 export type ImportFormat = "json" | "csv";
 
+/** Decoded RDS from a broadcast FM station (GET /api/rds, "rds" events). */
+export interface RdsState {
+  pi: string | null;
+  ps: string | null;
+  rt: string | null;
+  pty: number | null;
+  pty_name: string | null;
+  tp: boolean;
+  ta: boolean;
+  ms: boolean;
+  ct: string | null; // station local time, ISO 8601 with its UTC offset
+  rtplus: { title: string | null; artist: string | null } | null;
+  stereo: boolean;
+  synced: boolean;
+  block_error_rate: number;
+}
+
 export type ServerEvent =
   | { type: "state"; state: RadioState }
+  | { type: "rds"; rds: RdsState | null }
   | { type: "error"; code: string; message: string }
   | { type: "stats"; stats: Stats }
   | { type: "memories" };

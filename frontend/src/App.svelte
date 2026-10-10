@@ -8,11 +8,13 @@
   import StatusBar from "./components/StatusBar.svelte";
   import MemoriesDrawer from "./components/MemoriesDrawer.svelte";
   import MemoryDialog from "./components/MemoryDialog.svelte";
+  import RdsCard from "./components/RdsCard.svelte";
+  import TaSnackbar from "./components/TaSnackbar.svelte";
   import {
-    app, fullSpan, noteFrame, reconcileAudio, recallMemory, refreshDevices, refreshMemories, setRadio,
+    app, fullSpan, noteFrame, noteRds, reconcileAudio, recallMemory, refreshDevices, refreshMemories, setRadio,
   } from "./lib/store.svelte";
   import { memoryKey } from "./lib/memories";
-  import { getBandplan, getSettings, getState } from "./lib/api";
+  import { getBandplan, getRds, getSettings, getState } from "./lib/api";
   import { ReconnectingSocket } from "./lib/ws";
   import { parseSpectrumFrame } from "./lib/protocol";
   import { frameBus } from "./lib/framebus";
@@ -30,6 +32,7 @@
       if (msg.type === "state") app.radio = msg.state;
       else if (msg.type === "error") app.error = msg.message;
       else if (msg.type === "stats") app.stats = msg.stats;
+      else if (msg.type === "rds") noteRds(msg.rds);
       else if (msg.type === "memories") void refreshMemories(); // changed here or in another window
     },
   });
@@ -55,10 +58,11 @@
   onMount(() => {
     (async () => {
       try {
-        const [settings, plan, state] = await Promise.all([getSettings(), getBandplan(), getState()]);
+        const [settings, plan, state, rds] = await Promise.all([getSettings(), getBandplan(), getState(), getRds()]);
         app.settings = settings;
         app.bands = plan.bands;
         app.radio = state;
+        if (rds && !app.rds) noteRds(rds); // the events socket may already have sent a newer one
         await Promise.all([refreshDevices(), refreshMemories()]);
         const last = settings.last_device_id;
         if (last && app.devices.some((d) => d.id === last)) app.selectedDevice = last;
@@ -149,6 +153,7 @@
 <div class="shell" style:--status-h="{statusH}px">
   <div class="full"><TopBar /></div>
   <div class="full"><BandBar /></div>
+  <div class="full">{#if app.radio?.running && app.radio.mode === "WFM"}<RdsCard />{/if}</div>
   <main class="card">
     <section class="spectrum" aria-label="Spectrum"><Spectrum /></section>
     <section class="waterfall" aria-label="Waterfall"><Waterfall /></section>
@@ -156,13 +161,14 @@
   {#if app.memoriesOpen}<MemoriesDrawer />{/if}
   <div class="statusbar full" bind:clientHeight={statusH}><StatusBar /></div>
   <ErrorBanner />
+  <TaSnackbar />
   {#if app.memoryDialog}<MemoryDialog />{/if}
 </div>
 
 <style>
   .shell {
     display: grid;
-    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    grid-template-rows: auto auto auto minmax(0, 1fr) auto;
     grid-template-columns: minmax(0, 1fr) auto;
     height: 100vh;
     background: var(--md-surface);

@@ -8,8 +8,10 @@ import { autoRange, passband, snapHz, type View } from "./freq";
 import type { SpectrumFrame } from "./protocol";
 import type { PlotInteractionOptions } from "./interact";
 import { byFrequency, openConfig, recallPatch } from "./memories";
+import { selectBand } from "./bands";
+import { taSnackbar, type TaSnack } from "./rds";
 import type {
-  Band, DeviceInfo, Memory, MemoryFields, RadioState, Settings, SettingsPatch, StatePatch, Stats,
+  Band, DeviceInfo, Memory, MemoryFields, Mode, RadioState, RdsState, Settings, SettingsPatch, StatePatch, Stats,
 } from "./types";
 
 export const app = $state({
@@ -34,6 +36,12 @@ export const app = $state({
   memoryDialog: null as { memory: Memory | null } | null,
   /** A memory recalled while stopped: applied by the next Start. */
   pendingRecall: null as StatePatch | null,
+  /** Decoded RDS while in WFM (null otherwise, or until something is decoded). */
+  rds: null as RdsState | null,
+  /** The traffic-announcement snackbar, while one is showing. */
+  taSnack: null as TaSnack | null,
+  /** The mode to go back to when leaving the FM broadcast band. */
+  prevMode: null as Mode | null,
 });
 
 export function fullSpan(r: RadioState): View {
@@ -91,6 +99,19 @@ export function plotOptions(onCursor?: (x: number | null, y: number | null) => v
     getPassband: () => (app.radio ? passband(app.radio.tune_hz, app.radio.mode, app.radio.bw_hz) : null),
     onCursor,
   };
+}
+
+/** A new RDS state from the engine: also drives the traffic-announcement snackbar. */
+export function noteRds(next: RdsState | null): void {
+  app.taSnack = taSnackbar(app.rds, next, app.taSnack);
+  app.rds = next;
+}
+
+/** Tune to a band chip, switching to and from WFM for the FM broadcast band. */
+export function tuneBand(band: Band): void {
+  const choice = selectBand(band, app.radio?.mode, app.prevMode);
+  app.prevMode = choice.prevMode;
+  void setRadio(choice.patch);
 }
 
 export const player = new AudioPlayer();

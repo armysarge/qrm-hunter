@@ -1,8 +1,7 @@
 <script lang="ts">
-  import { app, setRadio } from "../lib/store.svelte";
+  import { app, tuneBand } from "../lib/store.svelte";
+  import { GROUPS, groupLabel } from "../lib/bands";
   import type { BandGroup } from "../lib/types";
-
-  const GROUPS: BandGroup[] = ["HF", "VHF", "UHF"];
 
   const activeBand = $derived.by(() => {
     const r = app.radio;
@@ -22,17 +21,17 @@
   const shown = $derived(app.bands.filter((b) => (b.group ?? "HF") === group));
 </script>
 
-<nav class="bands" aria-label="Amateur bands">
+<nav class="bands" aria-label="Bands">
   <div class="seg" role="group" aria-label="Band range">
     {#each GROUPS as g (g)}
-      <button class:on={group === g} aria-pressed={group === g} onclick={() => (picked = g)}>{g}</button>
+      <button class:on={group === g} aria-pressed={group === g} onclick={() => (picked = g)}>{groupLabel(g)}</button>
     {/each}
   </div>
   <div class="chips">
     {#each shown as b (b.name)}
       <button class="chip" class:selected={active === b.name} aria-pressed={active === b.name} aria-label={b.name} disabled={!app.radio?.running}
         title="{(b.lo_hz / 1e6).toFixed(3)}–{(b.hi_hz / 1e6).toFixed(3)} MHz"
-        onclick={() => setRadio({ tune_hz: b.default_hz })}>
+        onclick={() => tuneBand(b)}>
         {#if active === b.name}<span class="material-symbols-rounded" aria-hidden="true">check</span>{/if}{b.name}
       </button>
     {/each}
@@ -60,6 +59,7 @@
     font-weight: 500;
     transition: background-color 200ms var(--md-motion);
   }
+  .seg button { white-space: nowrap; }
   .seg button + button { border-left: 1px solid var(--md-outline); }
   .seg button.on { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
   /* The chip row is the only thing allowed to scroll horizontally. */

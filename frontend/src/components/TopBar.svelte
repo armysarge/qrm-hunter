@@ -4,7 +4,7 @@
   import { BW_OPTIONS, STEP_OPTIONS } from "../lib/freq";
   import type { DirectSampling, Mode } from "../lib/types";
 
-  const MODES: Mode[] = ["AM", "USB", "LSB", "CW", "FM"];
+  const MODES: Mode[] = ["AM", "USB", "LSB", "CW", "FM", "WFM"];
   const running = $derived(!!app.radio?.running);
   const device = $derived(app.devices.find((d) => d.id === (running ? app.radio?.device_id : app.selectedDevice)));
   const agc = $derived(app.radio?.gain_db === null);
@@ -195,4 +195,9 @@
   .listen { min-width: 112px; padding: 0 20px 0 16px; }
   .listen.on { background: var(--md-primary-container); color: var(--md-on-primary-container); }
   .vol { width: 84px; }
+
+  /* Six modes must fit a 375 px phone (after the .seg rules so it wins). */
+  @media (max-width: 760px) {
+    .seg button { min-width: 0; padding: 0 10px; gap: 4px; }
+  }
 </style>

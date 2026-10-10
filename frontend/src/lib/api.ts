@@ -1,5 +1,5 @@
 import type {
-  Band, DeviceInfo, ImportFormat, Memory, MemoryFields, RadioState, Settings, SettingsPatch, StatePatch,
+  Band, DeviceInfo, ImportFormat, Memory, MemoryFields, RadioState, RdsState, Settings, SettingsPatch, StatePatch,
 } from "./types";
 
 export function getToken(search: string = typeof location !== "undefined" ? location.search : ""): string | null {
@@ -48,6 +48,7 @@ export const openSession = (deviceId: string, config?: StatePatch) =>
 export const closeSession = () => api<RadioState>("/api/session/close", json("POST", {}));
 export const getState = () => api<RadioState>("/api/state");
 export const patchState = (patch: StatePatch) => api<RadioState>("/api/state", json("PATCH", patch));
+export const getRds = () => api<RdsState | null>("/api/rds");
 export const getBandplan = () => api<{ region: number; bands: Band[] }>("/api/bandplan");
 export const getSettings = () => api<Settings>("/api/settings");
 export const patchSettings = (patch: SettingsPatch) => api<Settings>("/api/settings", json("PATCH", patch));
