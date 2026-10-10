@@ -14,15 +14,30 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, WebSocket
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from starlette.datastructures import Headers
 from starlette.requests import HTTPConnection
 from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocket as StarletteWebSocket
 
 from ..config.bandplan import bands_for_region
+from ..config.memories import (
+    MAX_IMPORT_BYTES,
+    MAX_MEMORIES,
+    ImportRequest,
+    Memory,
+    MemoryFields,
+    MemoryPatch,
+    MemoryStore,
+    export_csv,
+    export_json,
+    memories_path_for,
+    merge_import,
+    parse_import,
+    sorted_memories,
+)
 from ..config.settings import Settings, SettingsPatch, SettingsStore
 from ..engine.session import RadioSession, StateError
 from ..engine.state import StatePatch
@@ -152,9 +167,13 @@ def _restore_last_session(session: RadioSession, settings: Settings) -> None:
 
 def create_app(session: RadioSession, store: SettingsStore, *, token: str | None = None,
                static_dir: Path | None = None,
-               discover_fn: Callable[[], list[DeviceInfo]] = discover) -> FastAPI:
+               discover_fn: Callable[[], list[DeviceInfo]] = discover,
+               memory_store: MemoryStore | None = None) -> FastAPI:
 
     settings_lock = threading.Lock()
+    memories_lock = threading.Lock()
+    if memory_store is None:
+        memory_store = MemoryStore(memories_path_for(store.path))
 
     def save_settings(**changes) -> Settings:
         with settings_lock:
@@ -173,7 +192,21 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
     app = FastAPI(title="QRM Hunter", lifespan=lifespan)
     app.add_middleware(RequestGuard, loopback_only=token is None)
     app.state.settings = store.load()
+    app.state.memories = memory_store.load()
     _restore_last_session(session, app.state.settings)
+
+    def save_memories(memories: list[Memory]) -> None:
+        """Persist and announce a new memory list (call with memories_lock held)."""
+        app.state.memories = memories
+        memory_store.save(memories)
+        # Other open UIs refetch on this event.
+        session.events.publish({"type": "memories"})
+
+    def find_memory(memory_id: str) -> int:
+        for i, m in enumerate(app.state.memories):
+            if m.id == memory_id:
+                return i
+        raise HTTPException(404, "no such memory")
 
     def authorized(conn: HTTPConnection) -> bool:
         if token is None:
@@ -239,6 +272,66 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
     def patch_settings(patch: SettingsPatch) -> dict:
         return save_settings(**patch.model_dump(exclude_unset=True, exclude_none=True)).model_dump(
             exclude={"token"})
+
+    @api.get("/memories")
+    def list_memories() -> list[dict]:
+        return [m.model_dump() for m in sorted_memories(app.state.memories)]
+
+    @api.post("/memories", status_code=201)
+    def create_memory(fields: MemoryFields) -> dict:
+        with memories_lock:
+            if len(app.state.memories) >= MAX_MEMORIES:
+                raise HTTPException(409, f"at most {MAX_MEMORIES} memories can be stored")
+            memory = Memory.new(fields)
+            save_memories([*app.state.memories, memory])
+        return memory.model_dump()
+
+    @api.get("/memories/export")
+    def export_memories(format: str = "json") -> Response:
+        if format == "json":
+            body, media = export_json(app.state.memories), "application/json"
+        elif format == "csv":
+            body, media = export_csv(app.state.memories), "text/csv"
+        else:
+            raise HTTPException(422, "format must be json or csv")
+        return Response(body, media_type=media, headers={
+            "Content-Disposition": f'attachment; filename="qrm-hunter-memories.{format}"'})
+
+    @api.post("/memories/import")
+    def import_memories(req: ImportRequest) -> dict:
+        if len(req.data.encode("utf-8")) > MAX_IMPORT_BYTES:
+            raise HTTPException(413, f"import data is larger than {MAX_IMPORT_BYTES // 1_000_000} MB")
+        try:
+            incoming, invalid = parse_import(req.format, req.data)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        with memories_lock:
+            merged, added, skipped = merge_import(app.state.memories, incoming, req.replace)
+            if added or req.replace:
+                save_memories(merged)
+        return {"added": added, "skipped": skipped + invalid}
+
+    @api.patch("/memories/{memory_id}")
+    def patch_memory(memory_id: str, patch: MemoryPatch) -> dict:
+        with memories_lock:
+            i = find_memory(memory_id)
+            old = app.state.memories[i]
+            try:
+                new = Memory.model_validate({**old.model_dump(), **patch.model_dump(exclude_unset=True)})
+            except ValidationError as exc:
+                raise HTTPException(422, "; ".join(
+                    f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors())) from exc
+            memories = list(app.state.memories)
+            memories[i] = new
+            save_memories(memories)
+        return new.model_dump()
+
+    @api.delete("/memories/{memory_id}", status_code=204)
+    def delete_memory(memory_id: str) -> Response:
+        with memories_lock:
+            i = find_memory(memory_id)
+            save_memories([m for j, m in enumerate(app.state.memories) if j != i])
+        return Response(status_code=204)
 
     app.include_router(api)
 

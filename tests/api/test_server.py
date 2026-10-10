@@ -278,3 +278,119 @@ def test_cors_preflight_is_not_granted(client):
         "Origin": "https://evil.example", "Access-Control-Request-Method": "POST",
         "Access-Control-Request-Headers": "content-type"})
     assert "access-control-allow-origin" not in {k.lower() for k in r.headers}
+
+
+# --- frequency memories -------------------------------------------------------------------------
+
+MEMORY = {"name": "FT8 20m", "tune_hz": 14_074_000, "mode": "USB", "bw_hz": 2700,
+          "gain_db": None, "direct_sampling": None, "note": ""}
+JSON_HEADERS = {"Content-Type": "application/json"}
+
+
+def test_memories_crud(client, tmp_path):
+    assert client.get("/api/memories").json() == []
+    r = client.post("/api/memories", json=MEMORY)
+    assert r.status_code == 201
+    m = r.json()
+    assert m["id"] and m["created"] and m["name"] == "FT8 20m"
+    client.post("/api/memories", json={**MEMORY, "name": "40m", "tune_hz": 7_074_000})
+    assert [x["name"] for x in client.get("/api/memories").json()] == ["40m", "FT8 20m"]  # by frequency
+    r = client.patch(f"/api/memories/{m['id']}", json={"note": "evening", "gain_db": 30})
+    assert r.status_code == 200 and r.json()["note"] == "evening" and r.json()["gain_db"] == 30
+    assert client.delete(f"/api/memories/{m['id']}", headers=JSON_HEADERS).status_code == 204
+    assert [x["name"] for x in client.get("/api/memories").json()] == ["40m"]
+    saved = json.loads((tmp_path / "memories.json").read_text(encoding="utf-8"))
+    assert [x["name"] for x in saved] == ["40m"]
+
+
+def test_memories_survive_restart(tmp_path):
+    c, _, _ = make_client(tmp_path)
+    with c:
+        c.post("/api/memories", json=MEMORY)
+    c, _, _ = make_client(tmp_path)
+    with c:
+        assert [m["name"] for m in c.get("/api/memories").json()] == ["FT8 20m"]
+
+
+def test_memory_404s(client):
+    assert client.patch("/api/memories/nope", json={"note": "x"}).status_code == 404
+    assert client.delete("/api/memories/nope", headers=JSON_HEADERS).status_code == 404
+
+
+@pytest.mark.parametrize("body", [
+    {**MEMORY, "name": ""}, {**MEMORY, "name": "   "}, {**MEMORY, "name": "x" * 61}, {**MEMORY, "tune_hz": 0},
+    {**MEMORY, "mode": "SSB"}, {**MEMORY, "note": "x" * 501}, {**MEMORY, "direct_sampling": "z"},
+    {**MEMORY, "bw_hz": 30_000}, {**MEMORY, "id": "mine"}, {k: v for k, v in MEMORY.items() if k != "mode"}])
+def test_memory_validation(client, body):
+    assert client.post("/api/memories", json=body).status_code == 422
+    assert client.get("/api/memories").json() == []
+
+
+def test_memory_patch_validation(client):
+    m = client.post("/api/memories", json=MEMORY).json()
+    for body in ({"name": None}, {"bw_hz": 10}, {"id": "x"}, {"created": "now"}):
+        assert client.patch(f"/api/memories/{m['id']}", json=body).status_code == 422
+    assert client.get("/api/memories").json() == [m]
+
+
+def test_memory_export_json_and_csv(client):
+    client.post("/api/memories", json={**MEMORY, "note": "a, b", "direct_sampling": "q"})
+    r = client.get("/api/memories/export?format=csv")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/csv")
+    assert r.headers["content-disposition"] == 'attachment; filename="qrm-hunter-memories.csv"'
+    assert r.text.splitlines() == ["name,tune_hz,mode,bw_hz,gain_db,direct_sampling,note",
+                                   'FT8 20m,14074000.0,USB,2700.0,,q,"a, b"']
+    r = client.get("/api/memories/export?format=json")
+    assert r.headers["content-disposition"].startswith("attachment;") and r.json()[0]["name"] == "FT8 20m"
+    assert client.get("/api/memories/export?format=xml").status_code == 422
+
+
+def test_memory_import_round_trip_and_skips(client):
+    client.post("/api/memories", json=MEMORY)
+    csv_text = client.get("/api/memories/export?format=csv").text
+    csv_text += "New,7074000,LSB,2400,,,\nBroken,abc,USB,2700,,,\n"
+    r = client.post("/api/memories/import", json={"format": "csv", "data": csv_text, "replace": False})
+    assert r.json() == {"added": 1, "skipped": 2}  # one duplicate, one invalid
+    exported = client.get("/api/memories/export?format=json").text
+    r = client.post("/api/memories/import", json={"format": "json", "data": exported, "replace": True})
+    assert r.json() == {"added": 2, "skipped": 0}
+    assert len(client.get("/api/memories").json()) == 2
+    assert client.post("/api/memories/import", json={"format": "json", "data": "{bad"}).status_code == 422
+    assert client.post("/api/memories/import", json={"format": "xml", "data": ""}).status_code == 422
+
+
+def test_memory_import_size_limit(client):
+    from qrm_hunter.config.memories import MAX_IMPORT_BYTES
+
+    big = "x" * (MAX_IMPORT_BYTES + 1)
+    assert client.post("/api/memories/import", json={"format": "csv", "data": big}).status_code == 413
+
+
+def test_memory_count_is_capped(client):
+    rows = [{**MEMORY, "name": f"m{i}", "tune_hz": 1e6 + i} for i in range(1005)]
+    r = client.post("/api/memories/import", json={"format": "json", "data": json.dumps(rows)})
+    assert r.json() == {"added": 1000, "skipped": 5}
+    assert client.post("/api/memories", json=MEMORY).status_code == 409
+    assert len(client.get("/api/memories").json()) == 1000
+
+
+def test_memory_changes_are_published_as_events(client):
+    with client.websocket_connect("ws://127.0.0.1:7070/ws/events") as ws:
+        assert ws.receive_json()["type"] == "state"
+        client.post("/api/memories", json=MEMORY)
+        for _ in range(20):
+            msg = ws.receive_json()
+            if msg["type"] == "memories":
+                break
+        assert msg == {"type": "memories"}
+
+
+def test_memory_writes_need_json_content_type(client):
+    r = client.post("/api/memories", content=json.dumps(MEMORY), headers={"Content-Type": "text/plain"})
+    assert r.status_code == 415
+    m = client.post("/api/memories", json=MEMORY).json()
+    assert client.delete(f"/api/memories/{m['id']}").status_code == 415
+    r = client.post("/api/memories/import", content=b"{}",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"})
+    assert r.status_code == 415
+    assert len(client.get("/api/memories").json()) == 1
