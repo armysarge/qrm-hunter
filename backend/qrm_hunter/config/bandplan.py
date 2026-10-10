@@ -1,4 +1,4 @@
-"""HF amateur band plans for IARU Regions 1, 2 and 3."""
+"""HF, VHF and UHF amateur band plans for IARU Regions 1, 2 and 3."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ class Band:
     name: str
     lo_hz: int
     hi_hz: int
+    group: str = "HF"  # "HF", "VHF" or "UHF"
 
     @property
     def default_hz(self) -> int:
@@ -36,10 +37,22 @@ _LOWER = {
 }
 
 
+_VHF_UHF = {
+    1: [("6m", 50_000_000, 52_000_000, "VHF"), ("4m", 70_000_000, 70_500_000, "VHF"),
+        ("2m", 144_000_000, 146_000_000, "VHF"), ("70cm", 430_000_000, 440_000_000, "UHF"),
+        ("23cm", 1_240_000_000, 1_300_000_000, "UHF")],
+    2: [("6m", 50_000_000, 54_000_000, "VHF"), ("2m", 144_000_000, 148_000_000, "VHF"),
+        ("1.25m", 222_000_000, 225_000_000, "VHF"), ("70cm", 420_000_000, 450_000_000, "UHF"),
+        ("23cm", 1_240_000_000, 1_300_000_000, "UHF")],
+    3: [("6m", 50_000_000, 54_000_000, "VHF"), ("2m", 144_000_000, 148_000_000, "VHF"),
+        ("70cm", 430_000_000, 440_000_000, "UHF"), ("23cm", 1_240_000_000, 1_300_000_000, "UHF")],
+}
+
+
 def bands_for_region(region: int) -> list[Band]:
     if region not in _LOWER:
         raise ValueError(f"unknown IARU region {region!r} (expected 1, 2 or 3)")
-    return [Band(*row) for row in _LOWER[region] + _UPPER]
+    return [Band(*row) for row in _LOWER[region] + _UPPER + _VHF_UHF[region]]
 
 
 def band_at(hz: float, region: int) -> Band | None:

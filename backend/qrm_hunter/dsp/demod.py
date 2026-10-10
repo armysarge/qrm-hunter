@@ -13,9 +13,11 @@ DEFAULT_BW: dict[str, float] = {"AM": 6000.0, "USB": 2700.0, "LSB": 2700.0, "CW"
                                  "FM": 10_000.0}
 CW_PITCH_HZ = 700.0
 TARGET_AUDIO_RATE = 12_000.0
+# Wider FM channels (12.5/25 kHz VHF/UHF spacing) need more audio-rate headroom for the channel filter.
+FM_AUDIO_RATE = 24_000.0
 _CHANNEL_TAPS = 129
 _AGC_TARGET = 0.3
-FM_DEVIATION_HZ = 2500.0  # amateur narrowband FM; full-scale audio at this deviation
+FM_DEVIATION_HZ = 2500.0  # full-scale audio deviation at a 10 kHz channel; scales with bandwidth
 FM_AUDIO_CUTOFF_HZ = 3000.0  # 1-pole de-emphasis / hiss filter after the discriminator
 
 
@@ -96,9 +98,8 @@ class Demodulator:
     def __init__(self, in_rate: float, mode: Mode = "AM", bw_hz: float | None = None,
                  offset_hz: float = 0.0, agc: bool = True) -> None:
         self.in_rate = float(in_rate)
-        factors = choose_decimation(self.in_rate)
-        self._stages = [Decimator(f) for f in factors]
-        self.out_rate = self.in_rate / math.prod(factors)
+        self._target_rate = 0.0
+        self._build_stages(FM_AUDIO_RATE if mode == "FM" else TARGET_AUDIO_RATE)
         self.agc_enabled = agc
         self._nco_phase = 0.0
         self._rot_key: tuple[int, float] | None = None
@@ -113,6 +114,12 @@ class Demodulator:
         self.set_offset(offset_hz)
         self.set_mode(mode, bw_hz)
 
+    def _build_stages(self, target: float) -> None:
+        factors = choose_decimation(self.in_rate, target)
+        self._stages = [Decimator(f) for f in factors]
+        self.out_rate = self.in_rate / math.prod(factors)
+        self._target_rate = target
+
     def set_offset(self, hz: float) -> None:
         if abs(hz) >= self.in_rate / 2:
             raise ValueError(f"offset {hz} Hz is outside the ±{self.in_rate / 2} Hz span")
@@ -122,6 +129,12 @@ class Demodulator:
         if mode not in DEFAULT_BW:
             raise ValueError(f"unknown mode {mode!r}")
         bw = float(DEFAULT_BW[mode] if bw_hz is None else bw_hz)
+        target = FM_AUDIO_RATE if mode == "FM" else TARGET_AUDIO_RATE
+        if target != self._target_rate:
+            prev = (self._stages, self.out_rate, self._target_rate)
+            self._build_stages(target)
+        else:
+            prev = None
         if mode in ("AM", "FM"):
             lo, hi = -bw / 2, bw / 2
         elif mode == "USB":
@@ -131,6 +144,8 @@ class Demodulator:
         else:  # CW, after the BFO shift
             lo, hi = CW_PITCH_HZ - bw / 2, CW_PITCH_HZ + bw / 2
         if not bw >= 50.0 or max(abs(lo), abs(hi)) >= 0.45 * self.out_rate:
+            if prev is not None:  # leave the demodulator exactly as it was
+                self._stages, self.out_rate, self._target_rate = prev
             raise ValueError(f"bandwidth {bw_hz} Hz invalid for mode {mode} (need >= 50 Hz and "
                              f"passband edge < {0.45 * self.out_rate:.0f} Hz)")
         self.mode = mode
@@ -178,7 +193,8 @@ class Demodulator:
         """Quadrature discriminator (phase step between samples) -> de-emphasis -> DC block."""
         prev = np.concatenate(([self._fm_prev], y[:-1]))
         self._fm_prev = np.complex64(y[-1])
-        freq = np.angle(y * np.conj(prev)) * (self.out_rate / (2 * np.pi * FM_DEVIATION_HZ))
+        deviation = FM_DEVIATION_HZ * max(1.0, self.bw_hz / 10_000.0)
+        freq = np.angle(y * np.conj(prev)) * (self.out_rate / (2 * np.pi * deviation))
         a = 1.0 - math.exp(-2 * math.pi * FM_AUDIO_CUTOFF_HZ / self.out_rate)
         lp, self._fm_lp_zi = lfilter([a], [1.0, a - 1.0], freq, zi=self._fm_lp_zi)
         # The DC blocker removes the constant term a mistuned carrier produces.

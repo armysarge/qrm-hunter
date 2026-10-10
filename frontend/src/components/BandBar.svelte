@@ -1,16 +1,35 @@
 <script lang="ts">
   import { app, setRadio } from "../lib/store.svelte";
+  import type { BandGroup } from "../lib/types";
 
-  const active = $derived.by(() => {
+  const GROUPS: BandGroup[] = ["HF", "VHF", "UHF"];
+
+  const activeBand = $derived.by(() => {
     const r = app.radio;
-    return r ? app.bands.find((b) => r.tune_hz >= b.lo_hz && r.tune_hz <= b.hi_hz)?.name : undefined;
+    return r ? app.bands.find((b) => r.tune_hz >= b.lo_hz && r.tune_hz <= b.hi_hz) : undefined;
   });
+  const active = $derived(activeBand?.name);
+
+  // The chip row shows one group at a time; it follows the tuned band unless the user picks another.
+  let picked = $state<BandGroup | null>(null);
+  let lastActive: BandGroup | undefined;
+  $effect(() => {
+    const g = activeBand?.group;
+    if (g && g !== lastActive) picked = null;
+    lastActive = g;
+  });
+  const group = $derived<BandGroup>(picked ?? activeBand?.group ?? "HF");
+  const shown = $derived(app.bands.filter((b) => (b.group ?? "HF") === group));
 </script>
 
 <nav class="bands" aria-label="Amateur bands">
-  <span class="label label-sm">Band</span>
+  <div class="seg" role="group" aria-label="Band range">
+    {#each GROUPS as g (g)}
+      <button class:on={group === g} aria-pressed={group === g} onclick={() => (picked = g)}>{g}</button>
+    {/each}
+  </div>
   <div class="chips">
-    {#each app.bands as b (b.name)}
+    {#each shown as b (b.name)}
       <button class="chip" class:selected={active === b.name} aria-pressed={active === b.name} aria-label={b.name} disabled={!app.radio?.running}
         title="{(b.lo_hz / 1e6).toFixed(3)}–{(b.hi_hz / 1e6).toFixed(3)} MHz"
         onclick={() => setRadio({ tune_hz: b.default_hz })}>
@@ -29,7 +48,20 @@
     padding: 4px 16px 8px;
     background: var(--md-surface-container);
   }
-  .label { flex: none; color: var(--md-on-surface-variant); text-transform: uppercase; }
+  /* M3 segmented button */
+  .seg { flex: none; display: flex; border: 1px solid var(--md-outline); border-radius: 16px; overflow: hidden; }
+  .seg button {
+    height: 32px;
+    padding: 0 12px;
+    border: 0;
+    background: transparent;
+    color: var(--md-on-surface);
+    font-size: 13px;
+    font-weight: 500;
+    transition: background-color 200ms var(--md-motion);
+  }
+  .seg button + button { border-left: 1px solid var(--md-outline); }
+  .seg button.on { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
   /* The chip row is the only thing allowed to scroll horizontally. */
   .chips {
     display: flex;

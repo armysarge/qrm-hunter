@@ -74,7 +74,9 @@
     };
   });
 
-  // Keep the visible range inside the SDR span; jump to full span if the tuned frequency left the view.
+  // Keep the visible range inside the SDR span; jump to full span only when a retune moves the
+  // tuned frequency out of view. Other state updates (averaging, gain, colours...) leave the zoom alone.
+  let lastTune: number | null = null;
   $effect(() => {
     const r = app.radio;
     if (!r) return;
@@ -83,7 +85,9 @@
     untrack(() => {
       const cur = app.view;
       let next = cur.hiHz > cur.loHz ? clampView(cur, limit) : limit;
-      if (tune < next.loHz || tune > next.hiHz) next = limit;
+      const retuned = tune !== lastTune;
+      lastTune = tune;
+      if (retuned && (tune < next.loHz || tune > next.hiHz)) next = limit;
       if (next.loHz !== cur.loHz || next.hiHz !== cur.hiHz) app.view = next;
     });
   });

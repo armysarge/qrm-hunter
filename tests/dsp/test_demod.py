@@ -180,3 +180,28 @@ def test_fm_mistuned_carrier_gives_no_dc():
     x = (0.1 * np.exp(2j * np.pi * 41_000.0 * t)).astype(np.complex64)  # 1 kHz off, unmodulated
     a = np.concatenate([d.process(b) for b in np.array_split(x, 10)]).astype(np.float64)
     assert abs(np.mean(a[len(a) // 2:])) < 300
+
+
+def test_fm_runs_at_24k_audio_and_switching_modes_rebuilds_decimation():
+    d = Demodulator(RATE, "FM", bw_hz=16_000.0, offset_hz=40_000.0, agc=False)
+    assert abs(d.out_rate - 24_000) / 24_000 < 0.1
+    d.set_mode("USB")
+    assert abs(d.out_rate - 12_000) / 12_000 < 0.1
+    d.set_mode("FM", 20_000.0)
+    assert abs(d.out_rate - 24_000) / 24_000 < 0.1
+
+
+def test_wide_fm_with_5khz_deviation_is_not_clipped():
+    d = Demodulator(RATE, "FM", bw_hz=20_000.0, offset_hz=40_000.0, agc=False)
+    x = fm_signal(RATE, 40_000.0, 1000.0, 5000.0)
+    a = np.concatenate([d.process(b) for b in np.array_split(x, 23)])[4000:]
+    assert abs(dominant_hz(a, d.out_rate) - 1000.0) < 10
+    assert np.max(np.abs(a.astype(np.int32))) < 32000  # 5 kHz deviation fits a 20 kHz channel
+
+
+def test_rejected_fm_bandwidth_keeps_previous_mode_and_rate():
+    d = Demodulator(RATE, "USB", agc=False)
+    rate = d.out_rate
+    with pytest.raises(ValueError):
+        d.set_mode("FM", 60_000.0)
+    assert (d.mode, d.out_rate) == ("USB", rate)

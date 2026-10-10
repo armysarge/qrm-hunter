@@ -270,7 +270,7 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
     def bandplan() -> dict:
         region = app.state.settings.region
         return {"region": region, "bands": [
-            {"name": b.name, "lo_hz": b.lo_hz, "hi_hz": b.hi_hz, "default_hz": b.default_hz}
+            {"name": b.name, "lo_hz": b.lo_hz, "hi_hz": b.hi_hz, "default_hz": b.default_hz, "group": b.group}
             for b in bands_for_region(region)]}
 
     @api.get("/settings")

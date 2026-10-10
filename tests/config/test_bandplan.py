@@ -7,7 +7,19 @@ NAMES = ["160m", "80m", "60m", "40m", "30m", "20m", "17m", "15m", "12m", "10m"]
 
 @pytest.mark.parametrize("region", [1, 2, 3])
 def test_every_region_has_the_ten_hf_bands_in_order(region):
-    assert [b.name for b in bands_for_region(region)] == NAMES
+    assert [b.name for b in bands_for_region(region) if b.group == "HF"] == NAMES
+
+
+@pytest.mark.parametrize("region,names", [
+    (1, ["6m", "4m", "2m", "70cm", "23cm"]),
+    (2, ["6m", "2m", "1.25m", "70cm", "23cm"]),
+    (3, ["6m", "2m", "70cm", "23cm"]),
+])
+def test_vhf_uhf_bands_follow_hf_in_frequency_order(region, names):
+    bands = bands_for_region(region)
+    assert [b.name for b in bands if b.group != "HF"] == names
+    assert [b.lo_hz for b in bands] == sorted(b.lo_hz for b in bands)
+    assert band_at(145_500_000, region).name == "2m"
 
 
 def test_region1_40m_edges():

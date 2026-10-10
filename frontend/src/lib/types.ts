@@ -35,7 +35,8 @@ export type StatePatch = Partial<Omit<RadioState, "device_id" | "running">>;
 
 export interface Stats { dropped: number; overflows: number; frame_rate: number; clients: number; }
 
-export interface Band { name: string; lo_hz: number; hi_hz: number; default_hz: number; }
+export type BandGroup = "HF" | "VHF" | "UHF";
+export interface Band { name: string; lo_hz: number; hi_hz: number; default_hz: number; group: BandGroup; }
 
 export type ColormapName = "turbo" | "viridis" | "grey";
 

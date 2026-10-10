@@ -7,9 +7,9 @@ export const BW_OPTIONS: Record<Mode, number[]> = {
   USB: [1800, 2400, 2700, 3000],
   LSB: [1800, 2400, 2700, 3000],
   CW: [250, 500, 1000],
-  FM: [6000, 8000, 10000],
+  FM: [6000, 10000, 12500, 16000, 20000],
 };
-export const STEP_OPTIONS = [10, 100, 500, 1000, 5000, 9000, 10000];
+export const STEP_OPTIONS = [10, 100, 500, 1000, 5000, 9000, 10000, 12500, 25000];
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
 

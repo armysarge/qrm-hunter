@@ -69,8 +69,8 @@ describe("search, grouping and files", () => {
     expect(ms.filter((m) => matchesQuery(m, "  ")).length).toBe(3);
   });
   it("groups by band with Other for out-of-band", () => {
-    const bands = [{ name: "40m", lo_hz: 7e6, hi_hz: 7.2e6, default_hz: 7.1e6 },
-      { name: "20m", lo_hz: 14e6, hi_hz: 14.35e6, default_hz: 14.1e6 }];
+    const bands = [{ name: "40m", lo_hz: 7e6, hi_hz: 7.2e6, default_hz: 7.1e6, group: "HF" as const },
+      { name: "20m", lo_hz: 14e6, hi_hz: 14.35e6, default_hz: 14.1e6, group: "HF" as const }];
     const sorted = [...ms].sort((a, b) => a.tune_hz - b.tune_hz);
     expect(groupByBand(sorted, bands).map((g) => [g.band, g.items.map((m) => m.name)])).toEqual([
       ["40m", ["Plasma TV"]], ["20m", ["FT8"]], ["Other", ["CB"]]]);
