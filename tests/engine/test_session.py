@@ -414,3 +414,31 @@ def test_real_time_synthetic_publishes_about_25_fps(session):
 
     fps = asyncio.run(run())
     assert 22.0 <= fps <= 27.0
+
+
+# --- final review fixes ------------------------------------------------------------------------
+
+
+def test_close_turns_audio_off_but_open_honours_explicit_audio(session):
+    session.open("synthetic", StatePatch(audio=True))
+    assert session.state.audio
+    session.close()
+    assert session.state.audio is False
+    assert session.open("synthetic").audio is False  # not resurrected by the next Start
+    session.close()
+    assert session.open("synthetic", StatePatch(audio=True)).audio is True
+
+
+def test_device_loss_turns_audio_off():
+    session = RadioSession(lambda _id: FailingDevice())
+
+    async def main():
+        sub = session.events.subscribe()
+        await asyncio.to_thread(session.open, "synthetic", StatePatch(audio=True))
+        return await next_of(sub, lambda e: e["type"] == "state" and not e["state"]["running"])
+
+    stopped = asyncio.run(main())
+    assert stopped["state"]["audio"] is False
+    assert session.state.audio is False
+    session.close()
+

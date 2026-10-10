@@ -165,7 +165,9 @@ class RadioSession:
             with self._lock:
                 run, self._run = self._run, None
                 was_running = self._state.running
-                self._state = self._state.model_copy(update={"running": False})
+                # audio goes off with the radio (the UI tears its player down on stop); an
+                # explicit audio=true on the next open() is still honoured
+                self._state = self._state.model_copy(update={"running": False, "audio": False})
             if run is not None:
                 run.stop.set()
                 for t in run.threads:
@@ -340,7 +342,7 @@ class RadioSession:
             current = self._run is run
             if current:
                 self._run = None
-                self._state = self._state.model_copy(update={"running": False})
+                self._state = self._state.model_copy(update={"running": False, "audio": False})
         if not current:  # a newer open()/close() already superseded this run
             return
         self.events.publish({"type": "error", "code": "device_lost", "message": str(exc)})
