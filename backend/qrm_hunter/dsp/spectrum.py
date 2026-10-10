@@ -12,8 +12,6 @@ class SpectrumProcessor:
     def __init__(self, fft_size: int = 8192, avg_alpha: float = 0.3, dc_fix: bool = True) -> None:
         if fft_size & (fft_size - 1) or not 1024 <= fft_size <= 65536:
             raise ValueError(f"fft_size must be a power of two in 1024..65536, got {fft_size}")
-        if not 0 < avg_alpha <= 1:
-            raise ValueError(f"avg_alpha must be in (0, 1], got {avg_alpha}")
         self.fft_size = fft_size
         self.avg_alpha = avg_alpha
         self.dc_fix = dc_fix
@@ -23,6 +21,16 @@ class SpectrumProcessor:
         self._noise_factor = float(np.sum(w**2)) * self._norm
         self._pending = np.empty(0, np.complex64)
         self._avg: np.ndarray | None = None
+
+    @property
+    def avg_alpha(self) -> float:
+        return self._avg_alpha
+
+    @avg_alpha.setter
+    def avg_alpha(self, value: float) -> None:
+        if not 0 < value <= 1:
+            raise ValueError(f"avg_alpha must be in (0, 1], got {value}")
+        self._avg_alpha = float(value)
 
     @property
     def bin_noise_factor(self) -> float:
@@ -74,10 +82,16 @@ def bin_for_display(spectrum_db: np.ndarray, center_hz: float, sample_rate: floa
     first_hz = center_hz - sample_rate / 2
     last_hz = first_hz + (n - 1) * bin_hz
     lo, hi = max(f_lo, first_hz), min(f_hi, last_hz)
-    if hi <= lo:
+    if hi < lo:
         return np.full(width, FLOOR_DB, np.float32), f_lo, f_hi
-    k_lo = int(np.ceil((lo - first_hz) / bin_hz))
-    k_hi = int(np.floor((hi - first_hz) / bin_hz))
+    eps = 1e-9  # keeps a view edge that sits exactly on a bin centre from being lost to float error
+    k_lo = max(int(np.ceil((lo - first_hz) / bin_hz - eps)), 0)
+    k_hi = min(int(np.floor((hi - first_hz) / bin_hz + eps)), n - 1)
+    if k_lo > k_hi:
+        # Sub-bin view: no bin centre inside [lo, hi]. Interpolate between the flanking bins.
+        freqs = np.linspace(lo, hi, width)
+        pos = np.clip((freqs - first_hz) / bin_hz, 0, n - 1)
+        return np.interp(pos, np.arange(n), spectrum_db).astype(np.float32), lo, hi
     seg = spectrum_db[k_lo:k_hi + 1]
     used_lo, used_hi = first_hz + k_lo * bin_hz, first_hz + k_hi * bin_hz
     if seg.size >= width:
