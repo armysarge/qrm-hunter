@@ -38,6 +38,29 @@ def _fmt_validation(exc: ValidationError) -> str:
     return "; ".join(str(e["msg"]).removeprefix("Value error, ") for e in exc.errors())
 
 
+class FrameGate:
+    """Paces spectrum publishing against a deadline rather than "time since the last frame".
+
+    Frames can only go out when a block arrives, so a "since last frame" gate rounds every
+    interval up to the next block (40 ms becomes 48 ms with 16 ms blocks: ~21 fps, not 25).
+    Advancing a deadline by one period keeps the long-run cadence exact. After a stall (more
+    than a period late) the deadline restarts from `now`, so there is no catch-up burst.
+    """
+
+    def __init__(self) -> None:
+        self._next: float | None = None
+
+    def ready(self, now: float, fps: float) -> bool:
+        if self._next is None:
+            self._next = now
+        if now < self._next:
+            return False
+        period = 1.0 / fps
+        late = now - self._next
+        self._next = (self._next if late < period else now) + period
+        return True
+
+
 class _Run:
     """One open/close cycle: its device, its own stop event, ring and threads."""
 
@@ -326,8 +349,9 @@ class RadioSession:
 
     def _dsp_loop(self, run: _Run) -> None:
         device = run.device
-        last_pub = 0.0
-        last_stats = time.monotonic()
+        clock = time.perf_counter  # high resolution: time.monotonic ticks in 15.6 ms on Windows
+        gate = FrameGate()
+        last_stats = clock()
         frames = 0
         pending = None  # (gen, center_hz, sample_rate, spectrum_db) captured when produced
         while not run.stop.is_set():
@@ -345,16 +369,15 @@ class RadioSession:
                 db = self._spectrum.process(block)
                 pcm = self._demod.process(block) if st.audio else None
                 rate = self._demod.out_rate
-            now = time.monotonic()
+            now = clock()
             if db is not None:
                 pending = (gen, st.center_hz, st.sample_rate, db)
             if pending is not None and pending[0] != gen:
                 pending = None
-            if pending is not None and now - last_pub >= 1.0 / st.fps:
+            if pending is not None and gate.ready(now, st.fps):
                 self._seq += 1
                 self.spectrum.publish(SpectrumFrame(self._seq, pending[1], pending[2], pending[3]))
                 pending = None
-                last_pub = now
                 frames += 1
             if pcm is not None and pcm.size:
                 self.audio.publish(AudioChunk(self._seq, rate, pcm))

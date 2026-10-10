@@ -350,3 +350,67 @@ def test_snapshot_readable_while_lock_held_and_tracks_updates():
     finally:
         s.close()
     assert s.snapshot.running is False
+
+
+# --- spectrum pacing (FrameGate) ---------------------------------------------------------------
+
+def _gate_fps(block_s, fps=25.0, seconds=2.0, quantum=0.0, jitter=0.0, seed=0):
+    """Simulate blocks arriving every block_s (optionally jittered and read through a clock that
+    ticks in `quantum` steps) and count the frames the gate lets through."""
+    import random
+
+    from qrm_hunter.engine.session import FrameGate
+
+    rnd = random.Random(seed)
+    gate, t, frames = FrameGate(), 100.0, 0
+    end = t + seconds
+    while t < end:
+        t += block_s + rnd.uniform(-jitter, jitter)
+        now = (t // quantum) * quantum if quantum else t
+        frames += gate.ready(now, fps)
+    return frames / seconds
+
+
+@pytest.mark.parametrize("quantum", [0.0, 0.015625])  # ideal clock, Windows GetTickCount64 clock
+def test_frame_gate_hits_target_fps_with_16ms_blocks(quantum):
+    # 2.048 MS/s in 32768-sample blocks: one block every 16 ms. The old "now - last >= 1/fps"
+    # gate rounded each 40 ms interval up to 48 ms (~21 fps).
+    assert 24.5 <= _gate_fps(32768 / RATE, quantum=quantum) <= 25.5
+
+
+def test_frame_gate_with_jittery_bursty_blocks():
+    assert 24.0 <= _gate_fps(0.016, jitter=0.008, quantum=0.015625) <= 26.0
+
+
+def test_frame_gate_does_not_burst_after_a_stall():
+    from qrm_hunter.engine.session import FrameGate
+
+    gate = FrameGate()
+    assert gate.ready(0.0, 25.0)
+    assert not gate.ready(0.02, 25.0)
+    # a 1 s stall, then blocks every 1 ms: one frame, then normal cadence (no catch-up burst)
+    stalled = [gate.ready(1.0 + i * 0.001, 25.0) for i in range(40)]
+    assert sum(stalled) == 1
+
+
+def test_frame_gate_never_exceeds_fps_with_fast_blocks():
+    assert _gate_fps(0.001, fps=10.0) <= 10.5
+
+
+@pytest.mark.performance
+def test_real_time_synthetic_publishes_about_25_fps(session):
+    async def run():
+        sub = session.spectrum.subscribe()
+        await asyncio.to_thread(session.open, "synthetic", StatePatch(tune_hz=7_100_000.0))
+        try:
+            await next_of(sub, lambda f: True)  # skip start-up
+            t0, count = time.perf_counter(), 0
+            while time.perf_counter() - t0 < 2.0:
+                await next_of(sub, lambda f: True)
+                count += 1
+            return count / (time.perf_counter() - t0)
+        finally:
+            session.spectrum.unsubscribe(sub)
+
+    fps = asyncio.run(run())
+    assert 22.0 <= fps <= 27.0
