@@ -4,6 +4,8 @@ import numpy as np
 import pytest
 
 from qrm_hunter.sdr.base import DeviceConfig, DeviceError
+from qrm_hunter.sdr.replay import ReplayDevice
+from qrm_hunter.sdr.sigmf_io import write_sigmf
 from qrm_hunter.sdr.synthetic import SyntheticDevice
 
 
@@ -11,7 +13,15 @@ def _synthetic(tmp_path):
     return SyntheticDevice(realtime=False)
 
 
-FACTORIES = {"synthetic": _synthetic}
+def _replay(tmp_path):
+    rec = SyntheticDevice(realtime=False)
+    rec.open()
+    rec.configure(DeviceConfig(center_hz=7_100_000.0, sample_rate=2.048e6))
+    meta = write_sigmf(tmp_path / "rec", rec.read(65536), 2.048e6, 7_100_000.0)
+    return ReplayDevice(meta, realtime=False)
+
+
+FACTORIES = {"synthetic": _synthetic, "replay": _replay}
 
 
 @pytest.fixture(params=sorted(FACTORIES))
