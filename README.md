@@ -38,8 +38,9 @@ Other options: `--port` (default 7070), `--config` (settings file) and `--log-le
 
 ```bash
 uv run pytest                     # backend tests (add -m hardware with an SDR attached)
-cd frontend && npm test && npm run check
-cd frontend && npm run dev        # UI on :5173, proxied to a backend on :7070
+cd frontend
+npm test && npm run check
+npm run dev                       # UI on :5173, proxied to a backend on :7070 (uv run qrm-hunter --serve)
 ```
 
 Settings are stored in your per-user config directory (`settings.toml`).
