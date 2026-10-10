@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Callable
 
 import numpy as np
 
-from .base import DeviceConfig, DeviceError, DeviceInfo, apply_limits
+from .base import DeviceConfig, DeviceError, DeviceInfo, DirectSampling, apply_limits
 
 RTL_RATES = (250_000.0, 1_024_000.0, 1_536_000.0, 1_792_000.0, 1_920_000.0, 2_048_000.0,
              2_160_000.0, 2_400_000.0, 2_560_000.0, 2_880_000.0, 3_200_000.0)
@@ -17,6 +18,36 @@ _LIBRARY_MISSING_MSG = (
     "Install pyrtlsdr and librtlsdr, or put librtlsdr.dll next to the application on Windows."
 )
 _LIBRARY_LOAD_HINTS = ("librtlsdr", "rtlsdr.dll", "cannot find", "could not find")
+
+# librtlsdr's rtlsdr_tuner enum. The RTL-SDR Blog V4 uses an R828D behind an HF upconverter, so
+# it tunes HF in normal (tuner) mode; R820T/R820T2 dongles (V3, clones) stop at about 24 MHz.
+_TUNER_R820T, _TUNER_R828D = 5, 6
+_TUNER_HF_FLOOR_HZ = 24_000_000.0  # R820T lowest usable frequency
+_DIRECT_CEILING_HZ = 28_800_000.0  # direct sampling covers 0..fs/2 of the 28.8 MHz ADC clock
+
+
+def _tuner_type(sdr: Any) -> int | None:
+    """The tuner chip, or None if it cannot be read (e.g. an older pyrtlsdr)."""
+    try:
+        from rtlsdr.librtlsdr import librtlsdr
+
+        return int(librtlsdr.rtlsdr_get_tuner_type(sdr.dev_p))
+    except Exception:
+        return None
+
+
+def _hf_input(tuner: int | None, requested: DirectSampling, center_hz: float) -> DirectSampling:
+    """Pick the HF input that can actually receive center_hz.
+
+    An R820T in tuner mode cannot go below 24 MHz (librtlsdr fails with LIBUSB_ERROR_IO), and
+    direct sampling cannot go above 28.8 MHz, so those combinations are switched automatically.
+    Unknown tuners keep the requested input.
+    """
+    if tuner == _TUNER_R820T and requested == "off" and center_hz < _TUNER_HF_FLOOR_HZ:
+        return "q"
+    if tuner is not None and requested != "off" and center_hz > _DIRECT_CEILING_HZ:
+        return "off"
+    return requested
 
 
 def _default_factory(index: int) -> Any:
@@ -51,6 +82,7 @@ class RtlSdrDevice:
         self._rate: float | None = None
         self._center: Any = _UNSET
         self._gain: Any = _UNSET
+        self._tuner: int | None = None
 
     def open(self) -> None:
         if self._sdr is not None:
@@ -71,6 +103,7 @@ class RtlSdrDevice:
                 f"cannot open RTL-SDR #{self._index}: {exc}. Is another program using it? "
                 "On Windows the WinUSB driver must be installed with Zadig."
             ) from exc
+        self._tuner = _tuner_type(self._sdr)
         self._ppm = 0
         self._direct = None
         self._rate = None
@@ -88,6 +121,8 @@ class RtlSdrDevice:
     def configure(self, cfg: DeviceConfig) -> DeviceConfig:
         sdr = self._require()
         applied = apply_limits(self.info, cfg)
+        applied = replace(applied, direct_sampling=_hf_input(self._tuner, applied.direct_sampling,
+                                                             applied.center_hz))
         try:
             # Every write here costs librtlsdr a tuner/PLL reprogram (a click in the audio and a
             # glitch in the spectrum), so each setting is only written when it actually changes.

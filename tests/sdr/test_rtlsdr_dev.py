@@ -178,3 +178,31 @@ def test_reopen_rewrites_everything():
     d.open()
     d.configure(DeviceConfig(center_hz=7.1e6, gain_db=10.0))
     assert (fakes[1].center_sets, fakes[1].gain_sets) == ([7.1e6], [10.0])
+
+
+def make_with_tuner(monkeypatch, tuner):
+    import qrm_hunter.sdr.rtlsdr_dev as mod
+
+    monkeypatch.setattr(mod, "_tuner_type", lambda sdr: tuner)
+    return make()
+
+
+def test_r820t_below_24mhz_switches_to_direct_q(monkeypatch):
+    d, (fake,) = make_with_tuner(monkeypatch, 5)  # R820T: RTL-SDR v3 and most clones
+    applied = d.configure(DeviceConfig(center_hz=7.612e6, direct_sampling="off"))
+    assert (applied.direct_sampling, fake.ds) == ("q", 2)
+    applied = d.configure(DeviceConfig(center_hz=144.8e6, direct_sampling="q"))
+    assert (applied.direct_sampling, fake.ds) == ("off", 0)  # direct sampling can't reach 2 m
+    applied = d.configure(DeviceConfig(center_hz=28.5e6, direct_sampling="q"))
+    assert applied.direct_sampling == "q"  # 10 m works in either mode: keep the user's choice
+
+
+def test_r828d_v4_keeps_tuner_mode_on_hf(monkeypatch):
+    d, (fake,) = make_with_tuner(monkeypatch, 6)  # R828D: RTL-SDR Blog V4 (HF upconverter)
+    applied = d.configure(DeviceConfig(center_hz=7.612e6, direct_sampling="off"))
+    assert (applied.direct_sampling, fake.ds) == ("off", 0)
+
+
+def test_unknown_tuner_keeps_requested_input(monkeypatch):
+    d, (fake,) = make_with_tuner(monkeypatch, None)
+    assert d.configure(DeviceConfig(center_hz=7.1e6, direct_sampling="off")).direct_sampling == "off"
