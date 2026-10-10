@@ -1,16 +1,16 @@
 # QRM Hunter
 
-See, record, identify and hunt down HF interference (QRM) with common SDRs.
+See, record, identify and hunt down HF interference (QRM) with an RTL-SDR or any SoapySDR radio.
 
-Sub-project 1 (this release): a live spectrum and waterfall with click-to-tune, zoom/pan, HF band presets and AM/SSB/CW audio. It runs as a desktop window or headless on a Raspberry Pi. Recording, automatic QRM classification, a 24/7 logger, guided source hunting and a community QRM library.
+Built by a ham for hams who want to know whether that S7 noise floor is an inverter, a phone charger or the neighbour's VDSL. Right now it gives you a fast live spectrum and waterfall with click-to-tune, zoom/pan, HF band presets, AM/SSB/CW/FM audio and frequency memories. It runs as a desktop window or headless on a Raspberry Pi. Recording with automatic QRM identification, a 24/7 logger, step-by-step source hunting and a shared library of known QRM signatures are on the way.
 
-![Live spectrum and waterfall on 40 m](docs/screenshots/sp1-40m.png)
+![Live spectrum and waterfall on 40 m](assets/screenshot.png)
 
 ## Supported hardware
 
 | Device | How |
 |---|---|
-| RTL-SDR v3 / v4 / clones | Built in (pyrtlsdr). v3: set **HF → Direct Q** below 24 MHz. v4: leave on **Tuner**. Windows: install the WinUSB driver with [Zadig](https://zadig.akeo.ie/). |
+| RTL-SDR v3 / v4 / clones | Built in (pyrtlsdr). A v3 or clone switches to Direct Q below 24 MHz on its own; a v4 uses its built-in upconverter. Windows: install the WinUSB driver with [Zadig](https://zadig.akeo.ie/). |
 | SDRplay, Airspy, HackRF, others | Through SoapySDR plus the device's Soapy module (see below). |
 | No hardware | **Synthetic demo**, a built-in generator of typical QRM (SMPS combs, mains buzz, VDSL, impulses). |
 
@@ -44,3 +44,9 @@ npm run dev                       # UI on :5173, proxied to a backend on :7070 (
 ```
 
 Settings are stored in your per-user config directory (`settings.toml`).
+
+## Author
+
+Shaun Scholtz, **ZS6SHZ**. Bug reports, QRM captures and pull requests are welcome.
+
+73!

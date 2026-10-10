@@ -13,7 +13,7 @@
 </script>
 
 <header class="top">
-  <div class="brand">
+  <div class="brand" title="QRM Hunter by Shaun Scholtz, ZS6SHZ">
     <span class="material-symbols-rounded mark" aria-hidden="true">radar</span>
     <span class="title">QRM Hunter</span>
   </div>

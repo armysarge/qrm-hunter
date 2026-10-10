@@ -2,6 +2,7 @@
 name = "qrm-hunter"
 version = "0.1.0"
 description = "See, record, identify and hunt down HF QRM with common SDRs"
+authors = [{ name = "Shaun Scholtz (ZS6SHZ)", email = "armysarge.ss@gmail.com" }]
 requires-python = ">=3.12"
 dependencies = [
   "numpy>=2.0",
