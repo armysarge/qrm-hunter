@@ -76,3 +76,36 @@ describe("state-changing requests", () => {
     }
   });
 });
+
+describe("memory client", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("sends JSON bodies for every memory write, including DELETE, and handles 204", async () => {
+    const fetchMock = vi.fn(async (_path: string, init?: RequestInit) =>
+      init?.method === "DELETE" ? new Response(null, { status: 204 }) : new Response('{"added":1,"skipped":0}', { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { createMemory, deleteMemory, importMemories, updateMemory } = await import("./api");
+    const fields = { name: "x", tune_hz: 1e6, mode: "AM" as const, bw_hz: 6000, gain_db: null, direct_sampling: null, note: "" };
+    await createMemory(fields);
+    await updateMemory("a/b", { note: "n" });
+    expect(await deleteMemory("id1")).toBeUndefined();
+    expect(await importMemories("csv", "data")).toEqual({ added: 1, skipped: 0 });
+    const calls = fetchMock.mock.calls.map(([p, i]) => [p, i?.method]);
+    expect(calls).toEqual([["/api/memories", "POST"], ["/api/memories/a%2Fb", "PATCH"],
+      ["/api/memories/id1", "DELETE"], ["/api/memories/import", "POST"]]);
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(new Headers(init?.headers).get("Content-Type")).toBe("application/json");
+    }
+    expect(JSON.parse(fetchMock.mock.calls[3][1]!.body as string)).toEqual({ format: "csv", data: "data", replace: false });
+  });
+
+  it("fetches exports as a blob and surfaces errors", async () => {
+    const fetchMock = vi.fn(async (path: string) =>
+      path.endsWith("csv") ? new Response("name,tune_hz\n", { status: 200 }) : new Response('{"detail":"bad"}', { status: 422 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { exportMemories, listMemories } = await import("./api");
+    expect(await (await exportMemories("csv")).text()).toBe("name,tune_hz\n");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/memories/export?format=csv");
+    expect((await errorOf(listMemories())).message).toBe("bad");
+  });
+});

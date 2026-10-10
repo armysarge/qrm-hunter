@@ -1,4 +1,6 @@
-import type { Band, DeviceInfo, RadioState, Settings, SettingsPatch, StatePatch } from "./types";
+import type {
+  Band, DeviceInfo, ImportFormat, Memory, MemoryFields, RadioState, Settings, SettingsPatch, StatePatch,
+} from "./types";
 
 export function getToken(search: string = typeof location !== "undefined" ? location.search : ""): string | null {
   return new URLSearchParams(search).get("token");
@@ -10,7 +12,7 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function request(path: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
   const token = getToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
@@ -28,7 +30,12 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     if (!detail.trim()) detail = res.statusText ? `HTTP ${res.status} ${res.statusText}` : `HTTP ${res.status}`;
     throw new ApiError(res.status, detail);
   }
-  return (await res.json()) as T;
+  return res;
+}
+
+export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const res = await request(path, init);
+  return (res.status === 204 ? undefined : await res.json()) as T;
 }
 
 const json = (method: string, body: unknown): RequestInit => ({ method, body: JSON.stringify(body) });
@@ -44,3 +51,14 @@ export const patchState = (patch: StatePatch) => api<RadioState>("/api/state", j
 export const getBandplan = () => api<{ region: number; bands: Band[] }>("/api/bandplan");
 export const getSettings = () => api<Settings>("/api/settings");
 export const patchSettings = (patch: SettingsPatch) => api<Settings>("/api/settings", json("PATCH", patch));
+
+export const listMemories = () => api<Memory[]>("/api/memories");
+export const createMemory = (fields: MemoryFields) => api<Memory>("/api/memories", json("POST", fields));
+export const updateMemory = (id: string, patch: Partial<MemoryFields>) =>
+  api<Memory>(`/api/memories/${encodeURIComponent(id)}`, json("PATCH", patch));
+export const deleteMemory = (id: string) => api<void>(`/api/memories/${encodeURIComponent(id)}`, json("DELETE", {}));
+export const importMemories = (format: ImportFormat, data: string, replace = false) =>
+  api<{ added: number; skipped: number }>("/api/memories/import", json("POST", { format, data, replace }));
+/** The export file as a Blob (fetched rather than linked so the bearer token is sent as a header). */
+export const exportMemories = async (format: ImportFormat) =>
+  (await request(`/api/memories/export?format=${format}`)).blob();

@@ -1,10 +1,16 @@
-import { closeSession, getState, listDevices, openSession, patchSettings, patchState } from "./api";
+import {
+  closeSession, createMemory, deleteMemory, getState, listDevices, listMemories, openSession, patchSettings,
+  patchState, updateMemory,
+} from "./api";
 import { AudioPlayer } from "./audio";
 import { ReconnectingSocket } from "./ws";
 import { autoRange, passband, snapHz, type View } from "./freq";
 import type { SpectrumFrame } from "./protocol";
 import type { PlotInteractionOptions } from "./interact";
-import type { Band, DeviceInfo, RadioState, Settings, SettingsPatch, StatePatch, Stats } from "./types";
+import { byFrequency, openConfig, recallPatch } from "./memories";
+import type {
+  Band, DeviceInfo, Memory, MemoryFields, RadioState, Settings, SettingsPatch, StatePatch, Stats,
+} from "./types";
 
 export const app = $state({
   devices: [] as DeviceInfo[],
@@ -22,6 +28,12 @@ export const app = $state({
   volume: 0.8,
   audioOn: false,
   audioBusy: false,
+  memories: [] as Memory[],
+  memoriesOpen: false,
+  /** Save/edit dialog: null = closed; memory = editing that one, otherwise saving the current tune. */
+  memoryDialog: null as { memory: Memory | null } | null,
+  /** A memory recalled while stopped: applied by the next Start. */
+  pendingRecall: null as StatePatch | null,
 });
 
 export function fullSpan(r: RadioState): View {
@@ -105,7 +117,8 @@ export async function startStop(): Promise<void> {
     } else {
       const tune = app.radio?.tune_hz ?? app.settings?.last_tune_hz ?? 7_100_000;
       lastFrame = null;
-      app.radio = await openSession(app.selectedDevice, { tune_hz: tune });
+      app.radio = await openSession(app.selectedDevice, openConfig(tune, app.pendingRecall));
+      app.pendingRecall = null;
       app.error = null;
       if (app.radio?.running) autoRangeCountdown = AUTO_RANGE_AFTER_FRAMES;
     }
@@ -188,4 +201,58 @@ export async function saveSettings(patch: SettingsPatch): Promise<void> {
   } catch (e) {
     fail(e);
   }
+}
+
+// --- Frequency memories ---
+
+export async function refreshMemories(): Promise<void> {
+  try {
+    app.memories = (await listMemories()).sort(byFrequency);
+  } catch (e) {
+    fail(e);
+  }
+}
+
+export async function saveMemory(fields: MemoryFields): Promise<boolean> {
+  try {
+    const m = await createMemory(fields);
+    app.memories = [...app.memories.filter((x) => x.id !== m.id), m].sort(byFrequency);
+    return true;
+  } catch (e) {
+    fail(e);
+    return false;
+  }
+}
+
+export async function editMemory(id: string, patch: Partial<MemoryFields>): Promise<boolean> {
+  try {
+    const m = await updateMemory(id, patch);
+    app.memories = app.memories.map((x) => (x.id === id ? m : x)).sort(byFrequency);
+    return true;
+  } catch (e) {
+    fail(e);
+    return false;
+  }
+}
+
+export async function removeMemory(id: string): Promise<void> {
+  try {
+    await deleteMemory(id);
+    app.memories = app.memories.filter((x) => x.id !== id);
+  } catch (e) {
+    fail(e);
+  }
+}
+
+/** Tune to a memory. While stopped it is shown and kept for Start, which opens with it. */
+export async function recallMemory(m: Memory): Promise<void> {
+  const r = app.radio;
+  const patch = recallPatch(m, r);
+  if (r?.running) {
+    app.pendingRecall = null;
+    await setRadio(patch);
+    return;
+  }
+  app.pendingRecall = patch;
+  if (r) Object.assign(r, { tune_hz: patch.tune_hz, mode: patch.mode, bw_hz: patch.bw_hz });
 }

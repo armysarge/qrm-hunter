@@ -36,6 +36,10 @@
 
   <div class="hero">
     <FrequencyDisplay hz={app.radio?.tune_hz ?? 0} disabled={!running} onchange={(hz) => setRadio({ tune_hz: hz })} />
+    <button class="icon star" disabled={!app.radio} title="Save this frequency as a memory (M)" aria-label="Save memory"
+      onclick={() => (app.memoryDialog = { memory: null })}>
+      <span class="material-symbols-rounded" aria-hidden="true">star</span>
+    </button>
   </div>
 
   <div class="tools">
@@ -86,6 +90,10 @@
   </div>
 
   <div class="group audio">
+    <button class="memories" class:on={app.memoriesOpen} aria-pressed={app.memoriesOpen} title="Frequency memories"
+      onclick={() => (app.memoriesOpen = !app.memoriesOpen)}>
+      <span class="material-symbols-rounded" aria-hidden="true">bookmarks</span>Memories
+    </button>
     <button class="listen" class:on={app.audioOn} aria-pressed={app.audioOn} disabled={!running || app.audioBusy} onclick={toggleAudio}>
       <span class="material-symbols-rounded" aria-hidden="true">{app.audioOn ? "volume_off" : "volume_up"}</span>
       {app.audioOn ? "Mute" : "Listen"}
@@ -112,7 +120,11 @@
   .brand, .group, .tools { display: flex; align-items: center; min-width: 0; }
   .brand { grid-area: brand; }
   .device { grid-area: device; }
-  .hero { grid-area: hero; display: flex; justify-content: center; min-width: 0; }
+  .hero { grid-area: hero; display: flex; align-items: center; justify-content: center; gap: 4px; min-width: 0; }
+  .star { flex: none; }
+  .star .material-symbols-rounded { font-size: 24px; color: var(--md-primary); }
+  .memories { padding: 0 16px 0 12px; }
+  .memories.on { background: var(--md-primary-container); color: var(--md-on-primary-container); }
   .tools { grid-area: tools; }
   .audio { grid-area: audio; }
 

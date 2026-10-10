@@ -6,7 +6,12 @@
   import Spectrum from "./components/Spectrum.svelte";
   import Waterfall from "./components/Waterfall.svelte";
   import StatusBar from "./components/StatusBar.svelte";
-  import { app, fullSpan, noteFrame, reconcileAudio, refreshDevices, setRadio } from "./lib/store.svelte";
+  import MemoriesDrawer from "./components/MemoriesDrawer.svelte";
+  import MemoryDialog from "./components/MemoryDialog.svelte";
+  import {
+    app, fullSpan, noteFrame, reconcileAudio, recallMemory, refreshDevices, refreshMemories, setRadio,
+  } from "./lib/store.svelte";
+  import { memoryKey } from "./lib/memories";
   import { getBandplan, getSettings, getState } from "./lib/api";
   import { ReconnectingSocket } from "./lib/ws";
   import { parseSpectrumFrame } from "./lib/protocol";
@@ -23,6 +28,7 @@
       if (msg.type === "state") app.radio = msg.state;
       else if (msg.type === "error") app.error = msg.message;
       else if (msg.type === "stats") app.stats = msg.stats;
+      else if (msg.type === "memories") void refreshMemories(); // changed here or in another window
     },
   });
 
@@ -51,7 +57,7 @@
         app.settings = settings;
         app.bands = plan.bands;
         app.radio = state;
-        await refreshDevices();
+        await Promise.all([refreshDevices(), refreshMemories()]);
         const last = settings.last_device_id;
         if (last && app.devices.some((d) => d.id === last)) app.selectedDevice = last;
       } catch (e) {
@@ -107,6 +113,21 @@
   function onKey(e: KeyboardEvent) {
     if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
     if ((e.target as HTMLElement).closest("input, select, textarea")) return;
+    if (app.memoryDialog) return; // a modal is open
+    const mk = memoryKey(e, false);
+    if (mk?.kind === "save" && app.radio) {
+      e.preventDefault();
+      app.memoryDialog = { memory: null };
+      return;
+    }
+    if (mk?.kind === "recall") {
+      const m = app.memories[mk.index];
+      if (m) {
+        e.preventDefault();
+        void recallMemory(m);
+      }
+      return;
+    }
     const r = app.radio;
     if (!r?.running) return;
     if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
@@ -120,21 +141,23 @@
 <svelte:window onkeydown={onKey} />
 
 <div class="shell" style:--status-h="{statusH}px">
-  <TopBar />
-  <BandBar />
+  <div class="full"><TopBar /></div>
+  <div class="full"><BandBar /></div>
   <main class="card">
     <section class="spectrum" aria-label="Spectrum"><Spectrum /></section>
     <section class="waterfall" aria-label="Waterfall"><Waterfall /></section>
   </main>
-  <div class="statusbar" bind:clientHeight={statusH}><StatusBar /></div>
+  {#if app.memoriesOpen}<MemoriesDrawer />{/if}
+  <div class="statusbar full" bind:clientHeight={statusH}><StatusBar /></div>
   <ErrorBanner />
+  {#if app.memoryDialog}<MemoryDialog />{/if}
 </div>
 
 <style>
   .shell {
     display: grid;
     grid-template-rows: auto auto minmax(0, 1fr) auto;
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) auto;
     height: 100vh;
     background: var(--md-surface);
   }
@@ -148,6 +171,7 @@
     background: var(--md-surface-container-low);
     overflow: hidden;
   }
+  .full { grid-column: 1 / -1; min-width: 0; }
   .spectrum, .waterfall { position: relative; min-height: 0; }
   .spectrum { border-bottom: 1px solid var(--md-outline-variant); }
 </style>

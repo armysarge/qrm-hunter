@@ -50,7 +50,22 @@ export interface Settings {
 
 export type SettingsPatch = Partial<Pick<Settings, "region" | "mains_hz" | "theme" | "colormap">>;
 
+export interface MemoryFields {
+  name: string;
+  tune_hz: number;
+  mode: Mode;
+  bw_hz: number;
+  gain_db: number | null; // null = AGC
+  direct_sampling: DirectSampling | null; // null = leave the radio's setting alone
+  note: string;
+}
+
+export interface Memory extends MemoryFields { id: string; created: string; }
+
+export type ImportFormat = "json" | "csv";
+
 export type ServerEvent =
   | { type: "state"; state: RadioState }
   | { type: "error"; code: string; message: string }
-  | { type: "stats"; stats: Stats };
+  | { type: "stats"; stats: Stats }
+  | { type: "memories" };

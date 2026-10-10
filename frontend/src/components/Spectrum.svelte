@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { app, plotOptions } from "../lib/store.svelte";
+  import { app, plotOptions, recallMemory } from "../lib/store.svelte";
+  import { layoutMarkers, markerAt, type Marker } from "../lib/memories";
   import { frameBus } from "../lib/framebus";
   import { formatHz, formatTick, hzToX, niceTicks, passband, resampleToView, xToHz } from "../lib/freq";
   import { attachPlotInteractions } from "../lib/interact";
@@ -14,6 +15,11 @@
   let dbMax = -20;
   let cursor: { x: number; y: number } | null = null;
   let dirty = true;
+  let ctx: CanvasRenderingContext2D | null = null;
+  // Memory markers in CSS px, recomputed only when the view, the memories or the size change.
+  let markers: Marker[] = [];
+  const MARKER_TOP = 18; // below the band-name row
+  const MARKER_H = 16;
 
   let colorCache: ReturnType<typeof readColors> | null = null;
   function colors() {
@@ -23,7 +29,19 @@
     const cs = getComputedStyle(document.documentElement);
     const v = (n: string) => cs.getPropertyValue(n).trim();
     return { bg: v("--md-surface-container-low"), grid: v("--grid"), text: v("--muted"), accent: v("--md-primary"),
-      accentSoft: v("--accent-soft"), trace: v("--trace"), band: v("--band"), line: v("--line") };
+      accentSoft: v("--accent-soft"), trace: v("--trace"), band: v("--band"), line: v("--line"),
+      marker: v("--md-tertiary") };
+  }
+
+  const markerFont = (dpr: number) => `${Math.round(10.5 * dpr)}px ${MONO}`;
+
+  function layout() {
+    if (!ctx) return;
+    const dpr = devicePixelRatio || 1;
+    ctx.font = markerFont(dpr);
+    const c = ctx;
+    markers = layoutMarkers(app.memories, app.view, canvas.width / dpr, (s) => c.measureText(s).width / dpr);
+    dirty = true;
   }
 
   function draw(ctx: CanvasRenderingContext2D) {
@@ -76,6 +94,16 @@
       ctx.fillRect(Math.round(hzToX(r.tune_hz, view, W)), 0, Math.max(1, dpr), plotH);
     }
 
+    if (markers.length) {
+      ctx.fillStyle = c.marker;
+      ctx.font = markerFont(dpr);
+      for (const k of markers) {
+        const x = Math.round(k.x * dpr);
+        ctx.fillRect(x, 0, Math.max(1, Math.round(dpr)), (MARKER_TOP + MARKER_H) * dpr);
+        ctx.fillText(k.label, x + 4 * dpr, (MARKER_TOP + 11) * dpr);
+      }
+    }
+
     const trace = (data: Uint8Array) => {
       ctx.beginPath();
       for (let x = 0; x < data.length; x++) {
@@ -124,14 +152,27 @@
     }
   }
 
+  // Registered before the plot interactions so a marker click recalls instead of click-tuning.
+  function onMarkerDown(e: PointerEvent) {
+    if (e.button !== 0 || !markers.length) return;
+    const rect = canvas.getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    if (y > MARKER_TOP + MARKER_H) return;
+    const hit = markerAt(markers, e.clientX - rect.left);
+    if (!hit) return;
+    e.stopImmediatePropagation();
+    void recallMemory(hit.memory);
+  }
+
   onMount(() => {
-    const ctx = canvas.getContext("2d")!;
+    const ctx2d = canvas.getContext("2d")!;
+    ctx = ctx2d;
     const ro = new ResizeObserver(() => {
       const dpr = devicePixelRatio || 1;
       canvas.width = Math.max(16, Math.round(wrap.clientWidth * dpr));
       canvas.height = Math.max(16, Math.round(wrap.clientHeight * dpr));
       peak = null;
-      dirty = true;
+      layout();
     });
     ro.observe(wrap);
     const off = frameBus.on((f) => {
@@ -144,6 +185,7 @@
       else for (let i = 0; i < w; i++) peak[i] = Math.max(peak[i], latest[i]);
       dirty = true;
     });
+    canvas.addEventListener("pointerdown", onMarkerDown);
     const detach = attachPlotInteractions(canvas, plotOptions((x, y) => {
       cursor = x === null || y === null ? null : { x, y };
       dirty = true;
@@ -151,7 +193,7 @@
     let raf = 0;
     const loop = () => {
       if (dirty) {
-        draw(ctx);
+        draw(ctx2d);
         dirty = false;
       }
       raf = requestAnimationFrame(loop);
@@ -159,6 +201,8 @@
     raf = requestAnimationFrame(loop);
     return () => {
       cancelAnimationFrame(raf);
+      canvas.removeEventListener("pointerdown", onMarkerDown);
+      ctx = null;
       off();
       detach();
       ro.disconnect();
@@ -173,6 +217,11 @@
     void app.radio?.tune_hz; void app.radio?.bw_hz; void app.radio?.mode;
     if (!app.peakHold) peak = null;
     dirty = true;
+  });
+
+  $effect(() => {
+    void app.view.loHz; void app.view.hiHz; void app.memories;
+    layout();
   });
 </script>
 
