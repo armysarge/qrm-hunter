@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import ipaddress
 import logging
+import re
 import secrets
 import threading
 import time
@@ -12,6 +14,7 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
+from uvicorn.config import LOGGING_CONFIG
 
 from .api.server import create_app
 from .config.settings import SettingsStore
@@ -19,6 +22,36 @@ from .engine.session import RadioSession
 
 WEB_DIR = Path(__file__).parent / "web"
 log = logging.getLogger("qrm_hunter")
+
+_TOKEN_RE = re.compile(r"token=[^&\s\"']+")
+
+
+class RedactTokenFilter(logging.Filter):
+    """Rewrites `token=<value>` to `token=***` in log messages. uvicorn's websocket layer logs the
+    request path, query string included, at info level, whatever access_log is set to."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:  # malformed record: leave it for the handler to report
+            return True
+        redacted = _TOKEN_RE.sub("token=***", message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
+def redaction_log_config(token: str | None) -> dict | None:
+    """uvicorn logging config with RedactTokenFilter on its handlers, or None when no token is in use.
+    Passing it as log_config means uvicorn's own dictConfig call cannot drop the filter."""
+    if not token:
+        return None
+    config = copy.deepcopy(LOGGING_CONFIG)
+    config["filters"] = {"redact_token": {"()": RedactTokenFilter}}
+    for handler in config["handlers"].values():
+        handler["filters"] = ["redact_token"]
+    return config
 
 
 def is_loopback(host: str) -> bool:
@@ -43,6 +76,8 @@ def resolve_token(host: str, store: SettingsStore) -> str | None:
 
 def ui_url(host: str, port: int, token: str | None) -> str:
     shown = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    if ":" in shown:  # IPv6 literal
+        shown = f"[{shown}]"
     return f"http://{shown}:{port}/" + (f"?token={token}" if token else "")
 
 
@@ -64,13 +99,23 @@ def build_app(args: argparse.Namespace) -> tuple[FastAPI, str | None]:
 
 
 def server_kwargs(args: argparse.Namespace, token: str | None) -> dict:
-    """uvicorn options for headless mode. Access logs are off when a token is in use, because
-    the token may travel in `?token=` query strings that the access log would record."""
-    return {"host": args.host, "port": args.port, "log_level": args.log_level, "access_log": token is None}
+    """uvicorn options for headless mode. When a token is in use, access logs are off and log
+    records are redacted, because the token may travel in `?token=` query strings."""
+    kwargs = {"host": args.host, "port": args.port, "log_level": args.log_level, "access_log": token is None}
+    redaction = redaction_log_config(token)
+    if redaction is not None:
+        kwargs["log_config"] = redaction
+    return kwargs
 
 
-def run_desktop(app: FastAPI, args: argparse.Namespace) -> None:
-    import webview
+def run_desktop(app: FastAPI, args: argparse.Namespace) -> bool:
+    """Show the desktop window. Returns True after a normal close, or False when no window could be
+    shown (the server is stopped first, so the caller can fall back to --serve on the same port)."""
+    try:
+        import webview
+    except ImportError as exc:
+        log.warning("desktop window unavailable (%s); falling back to --serve", exc)
+        return False
 
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=args.port, log_level=args.log_level))
     thread = threading.Thread(target=server.run, name="uvicorn", daemon=True)
@@ -80,11 +125,19 @@ def run_desktop(app: FastAPI, args: argparse.Namespace) -> None:
         if not thread.is_alive() or time.monotonic() > deadline:
             raise SystemExit(f"server failed to start on port {args.port} (in use? try --port)")
         time.sleep(0.05)
-    webview.create_window("QRM Hunter", ui_url("127.0.0.1", args.port, None), width=1440, height=900,
-                          min_size=(960, 600), background_color="#0B0D10")
-    webview.start()
-    server.should_exit = True
-    thread.join(timeout=5)
+    try:
+        webview.create_window("QRM Hunter", ui_url("127.0.0.1", args.port, None), width=1440, height=900,
+                              min_size=(960, 600), background_color="#0B0D10")
+        webview.start()
+        return True
+    except Exception as exc:  # no GUI backend, missing WebView2 runtime, ...
+        log.warning("desktop window unavailable (%s); falling back to --serve", exc)
+        return False
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+        if thread.is_alive():
+            raise SystemExit(f"desktop server on port {args.port} did not stop; not falling back")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -95,11 +148,11 @@ def main(argv: list[str] | None = None) -> None:
         args.host = "127.0.0.1"
     app, token = build_app(args)
     if not args.serve:
-        try:
-            run_desktop(app, args)
+        if run_desktop(app, args):
             return
-        except ImportError as exc:
-            log.warning("desktop window unavailable (%s); falling back to --serve", exc)
+        # The desktop server has stopped and its lifespan closed the radio session, so rebuild
+        # the app for the headless server rather than reusing a closed session.
+        app, token = build_app(args)
     print(f"QRM Hunter is running at {ui_url(args.host, args.port, token)}", flush=True)
     uvicorn.run(app, **server_kwargs(args, token))
 
