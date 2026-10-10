@@ -14,9 +14,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
-from ..engine.state import DirectSampling, Mode
+from ..engine.state import DirectSampling, Mode, check_bw
 
 log = logging.getLogger(__name__)
 
@@ -37,10 +37,15 @@ class MemoryFields(BaseModel):
     name: str = Field(min_length=1, max_length=60)
     tune_hz: float = Field(gt=0)
     mode: Mode
-    bw_hz: float = Field(ge=50, le=20_000)  # the range RadioState accepts
+    bw_hz: float  # checked against the mode's range, as RadioState does
     gain_db: float | None = None  # None = AGC
     direct_sampling: DirectSampling | None = None  # None = leave the radio's setting alone
     note: str = Field(default="", max_length=500)
+
+    @model_validator(mode="after")
+    def _bw_for_mode(self) -> MemoryFields:
+        check_bw(self.mode, self.bw_hz)
+        return self
 
 
 class Memory(MemoryFields):

@@ -205,3 +205,99 @@ def test_rejected_fm_bandwidth_keeps_previous_mode_and_rate():
     with pytest.raises(ValueError):
         d.set_mode("FM", 60_000.0)
     assert (d.mode, d.out_rate) == ("USB", rate)
+
+
+# --- broadcast FM ------------------------------------------------------------------------------
+
+
+def wfm_signal(rate, offset, mpx, amp=0.1, noise=0.0, seed=0):
+    """Frequency-modulate an MPX signal (1.0 = 75 kHz deviation) onto a carrier at `offset`."""
+    n = mpx.size
+    phase = 2 * np.pi * (offset * np.arange(n) / rate + np.cumsum(mpx, dtype=np.float64) * 75_000.0 / rate)
+    x = amp * np.exp(1j * phase)
+    if noise:
+        rng = np.random.default_rng(seed)
+        x = x + noise * (rng.normal(size=n) + 1j * rng.normal(size=n))
+    return x.astype(np.complex64)
+
+
+def tone_mpx(rate, seconds, tone=1000.0, level=0.5, pilot=0.0):
+    t = np.arange(int(rate * seconds)) / rate
+    return level * np.cos(2 * np.pi * tone * t) + pilot * np.cos(2 * np.pi * 19_000.0 * t)
+
+
+def tone_amplitude(audio, fs, tone):
+    a = audio.astype(np.float64)
+    t = np.arange(a.size) / fs
+    return 2 * abs(np.mean(a * np.exp(-2j * np.pi * tone * t)))
+
+
+def test_wfm_rates_and_default_bandwidth():
+    d = Demodulator(RATE, "WFM", offset_hz=300_000.0)
+    assert (d.bw_hz, d.mpx_rate, d.out_rate) == (180_000.0, 256_000.0, 32_000.0)
+    d.set_mode("WFM", 150_000.0)
+    assert d.bw_hz == 150_000.0
+    assert Demodulator(2.4e6, "WFM").out_rate == pytest.approx(30_000.0)
+
+
+@pytest.mark.parametrize("rate", [250e3, 900e3])
+def test_wfm_needs_one_megasample(rate):
+    with pytest.raises(ValueError, match="Broadcast FM needs a sample rate of at least 1 MS/s"):
+        Demodulator(rate, "WFM")
+    d = Demodulator(rate, "USB")
+    with pytest.raises(ValueError, match="at least 1 MS/s"):
+        d.set_mode("WFM")
+    assert d.mode == "USB"
+
+
+@pytest.mark.parametrize("tau", [50e-6, 75e-6])
+def test_wfm_tone_and_deemphasis(tau):
+    rate, tone, level = 1.024e6, 1000.0, 0.5
+    x = wfm_signal(rate, 200_000.0, tone_mpx(rate, 0.6, tone, level))
+    d = Demodulator(rate, "WFM", offset_hz=200_000.0, deemphasis_s=tau)
+    a = np.concatenate([d.process(b) for b in blocks(x, [7, 30_000, 1, 65_536, 4096, 12_345])])
+    a = a[len(a) // 3:]
+    assert abs(dominant_hz(a, d.out_rate) - tone) < 5
+    expected = level * 0.5 * 32767 / np.sqrt(1 + (2 * np.pi * tone * tau) ** 2)  # one-pole RC
+    assert 20 * np.log10(tone_amplitude(a, d.out_rate, tone) / expected) == pytest.approx(0.0, abs=0.1)
+
+
+def test_wfm_75us_attenuates_more_than_50us_by_the_rc_ratio():
+    rate, tone = 1.024e6, 1000.0
+    x = wfm_signal(rate, 0.0, tone_mpx(rate, 0.5, tone))
+    amps = []
+    for tau in (50e-6, 75e-6):
+        d = Demodulator(rate, "WFM", deemphasis_s=tau)
+        a = d.process(x)
+        amps.append(tone_amplitude(a[len(a) // 3:], d.out_rate, tone))
+    w = 2 * np.pi * tone
+    expected_db = 10 * np.log10((1 + (w * 75e-6) ** 2) / (1 + (w * 50e-6) ** 2))  # about 0.46 dB
+    assert 20 * np.log10(amps[0] / amps[1]) == pytest.approx(expected_db, abs=0.05)
+
+
+@pytest.mark.parametrize("pilot,stereo", [(0.09, True), (0.0, False)])
+def test_wfm_pilot_detection(pilot, stereo):
+    rate = 2.048e6
+    x = wfm_signal(rate, -400_000.0, tone_mpx(rate, 0.3, pilot=pilot), noise=0.003)
+    d = Demodulator(rate, "WFM", offset_hz=-400_000.0)
+    for b in np.array_split(x, 19):
+        d.process(b)
+    assert d.stereo is stereo
+    assert d.mpx.dtype == np.float32 and d.mpx.size > 0
+
+
+def test_wfm_mpx_is_scaled_to_75khz_deviation():
+    rate = 1.024e6
+    x = wfm_signal(rate, 0.0, tone_mpx(rate, 0.2, 5000.0, 0.8))
+    d = Demodulator(rate, "WFM", bw_hz=200_000.0)
+    d.process(x[:100_000])
+    d.process(x[100_000:])
+    assert np.max(np.abs(d.mpx)) == pytest.approx(0.8, abs=0.05)
+
+
+def test_wfm_mode_switch_and_back():
+    d = Demodulator(RATE, "USB", offset_hz=100_000.0)
+    d.set_mode("WFM")
+    assert d.out_rate == 32_000.0
+    d.set_mode("USB")
+    assert abs(d.out_rate - 12_000) / 12_000 < 0.1 and d.mpx.size == 0 and not d.stereo

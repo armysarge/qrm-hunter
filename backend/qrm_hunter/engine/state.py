@@ -8,8 +8,19 @@ from typing import Literal
 import numpy as np
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-Mode = Literal["AM", "USB", "LSB", "CW", "FM"]
+Mode = Literal["AM", "USB", "LSB", "CW", "FM", "WFM"]
 DirectSampling = Literal["off", "i", "q"]
+
+
+def bw_limits(mode: str) -> tuple[float, float]:
+    """The channel bandwidths a mode accepts: broadcast FM is much wider than everything else."""
+    return (100_000.0, 250_000.0) if mode == "WFM" else (50.0, 20_000.0)
+
+
+def check_bw(mode: str, bw_hz: float) -> None:
+    lo, hi = bw_limits(mode)
+    if not lo <= bw_hz <= hi:
+        raise ValueError(f"bw_hz must be between {lo:g} and {hi:g} for {mode}")
 
 
 class RadioState(BaseModel):
@@ -45,8 +56,7 @@ class RadioState(BaseModel):
             raise ValueError("avg_alpha must be in (0, 1]")
         if not 1 <= self.fps <= 60:
             raise ValueError("fps must be between 1 and 60")
-        if not 50 <= self.bw_hz <= 20_000:
-            raise ValueError("bw_hz must be between 50 and 20000")
+        check_bw(self.mode, self.bw_hz)
         if self.tune_hz <= 0 or self.center_hz <= 0 or self.sample_rate <= 0:
             raise ValueError("frequencies and sample rate must be positive")
         return self
