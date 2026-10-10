@@ -1,0 +1,136 @@
+/* Material 3 tokens (scheme generated from seed #F5A524), plus short aliases used by components. */
+:root {
+  --md-primary: #ffb951;
+  --md-on-primary: #452b00;
+  --md-primary-container: #633f00;
+  --md-on-primary-container: #ffddb3;
+  --md-secondary: #ddc2a1;
+  --md-on-secondary: #3e2d16;
+  --md-secondary-container: #56442a;
+  --md-on-secondary-container: #fbdebc;
+  --md-tertiary: #b8cea1;
+  --md-error: #ffb4ab;
+  --md-on-error: #690005;
+  --md-error-container: #93000a;
+  --md-on-error-container: #ffdad6;
+  --md-surface: #17130e;
+  --md-surface-container-lowest: #110d09;
+  --md-surface-container-low: #1f1b16;
+  --md-surface-container: #231f1a;
+  --md-surface-container-high: #2e2924;
+  --md-surface-container-highest: #39342e;
+  --md-on-surface: #ebe1d9;
+  --md-on-surface-variant: #d4c4b5;
+  --md-outline: #9c8e80;
+  --md-outline-variant: #51453a;
+  --md-inverse-surface: #ebe1d9;
+  --md-inverse-on-surface: #352f2a;
+  --md-inverse-primary: #805610;
+  --md-success: #8bd88b;
+
+  --md-shape-xs: 4px;
+  --md-shape-sm: 8px;
+  --md-shape-md: 12px;
+  --md-shape-lg: 16px;
+  --md-shape-full: 999px;
+  --md-elev-1: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px 1px rgba(0, 0, 0, 0.15);
+  --md-elev-3: 0 4px 8px 3px rgba(0, 0, 0, 0.15), 0 1px 3px rgba(0, 0, 0, 0.3);
+  --md-motion: cubic-bezier(0.2, 0, 0, 1);
+
+  /* aliases used by canvas drawing and component CSS */
+  --bg: var(--md-surface);
+  --panel: var(--md-surface-container);
+  --panel-2: var(--md-surface-container-high);
+  --line: var(--md-outline-variant);
+  --text: var(--md-on-surface);
+  --muted: var(--md-on-surface-variant);
+  --accent: var(--md-primary);
+  --accent-soft: color-mix(in srgb, var(--md-primary) 18%, transparent);
+  --grid: color-mix(in srgb, var(--md-on-surface) 9%, transparent);
+  --trace: #8fd3ff;
+  --band: color-mix(in srgb, var(--md-tertiary) 7%, transparent);
+  --ok: var(--md-success);
+  --warn: var(--md-primary);
+  --err: var(--md-error);
+  --radius: var(--md-shape-sm);
+  --mono: "Roboto Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --sans: "Roboto Flex Variable", "Roboto", "Segoe UI Variable", system-ui, sans-serif;
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  --md-primary: #805610;
+  --md-on-primary: #ffffff;
+  --md-primary-container: #ffddb3;
+  --md-on-primary-container: #291800;
+  --md-secondary: #6f5b40;
+  --md-on-secondary: #ffffff;
+  --md-secondary-container: #fbdebc;
+  --md-on-secondary-container: #271904;
+  --md-tertiary: #51643f;
+  --md-error: #ba1a1a;
+  --md-on-error: #ffffff;
+  --md-error-container: #ffdad6;
+  --md-on-error-container: #410002;
+  --md-surface: #fff8f4;
+  --md-surface-container-lowest: #ffffff;
+  --md-surface-container-low: #fbf2ea;
+  --md-surface-container: #f5ece4;
+  --md-surface-container-high: #efe6de;
+  --md-surface-container-highest: #eae1d9;
+  --md-on-surface: #1f1b16;
+  --md-on-surface-variant: #51453a;
+  --md-outline: #837468;
+  --md-outline-variant: #d4c4b5;
+  --md-inverse-surface: #352f2a;
+  --md-inverse-on-surface: #f8efe7;
+  --md-inverse-primary: #ffb951;
+  --md-success: #2e7d32;
+  --trace: #0b6bcb;
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+html, body, #app { margin: 0; height: 100%; }
+body {
+  background: var(--md-surface); color: var(--md-on-surface);
+  font: 400 14px/20px var(--sans); letter-spacing: 0.01em; overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+button, select, input { font: inherit; color: inherit; }
+
+/* Buttons: M3 filled-tonal by default; .filled, .text and .icon variants. State layer via ::after. */
+button {
+  position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  height: 40px; padding: 0 16px; border: none; border-radius: var(--md-shape-full);
+  background: var(--md-secondary-container); color: var(--md-on-secondary-container);
+  font-weight: 500; font-size: 14px; letter-spacing: 0.01em; cursor: pointer; overflow: hidden;
+  transition: background-color 200ms var(--md-motion), box-shadow 200ms var(--md-motion);
+}
+button::after {
+  content: ""; position: absolute; inset: 0; background: currentColor; opacity: 0;
+  transition: opacity 150ms var(--md-motion); pointer-events: none;
+}
+button:hover:not(:disabled)::after { opacity: 0.08; }
+button:active:not(:disabled)::after { opacity: 0.12; }
+button.filled { background: var(--md-primary); color: var(--md-on-primary); }
+button.filled:hover:not(:disabled) { box-shadow: var(--md-elev-1); }
+button.text { background: transparent; color: var(--md-primary); padding: 0 12px; }
+button.icon { width: 40px; padding: 0; background: transparent; color: var(--md-on-surface-variant); }
+button:disabled { opacity: 0.38; cursor: default; }
+
+/* Outlined fields */
+select, input[type="number"], input[type="text"] {
+  height: 40px; padding: 0 12px; border-radius: var(--md-shape-xs);
+  border: 1px solid var(--md-outline); background: transparent; color: var(--md-on-surface);
+}
+select:hover:not(:disabled), input:hover:not(:disabled) { border-color: var(--md-on-surface); }
+select:focus, input:focus { outline: none; border: 2px solid var(--md-primary); padding: 0 11px; }
+select option { background: var(--md-surface-container-high); color: var(--md-on-surface); }
+select:disabled, input:disabled { opacity: 0.38; }
+input[type="range"] { accent-color: var(--md-primary); }
+input[type="checkbox"] { accent-color: var(--md-primary); width: 18px; height: 18px; }
+:focus-visible { outline: 3px solid var(--md-primary); outline-offset: 2px; }
+
+.material-symbols-rounded { font-size: 20px; line-height: 1; font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 20; }
+.num { font-family: var(--sans); font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+.label-sm { font-size: 11px; line-height: 16px; font-weight: 500; letter-spacing: 0.05em; }
