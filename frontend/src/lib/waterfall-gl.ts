@@ -35,22 +35,62 @@ function makeTexture(gl: WebGL2RenderingContext): WebGLTexture {
 }
 
 /** Scrolling waterfall: one R8 texture used as a ring of rows, coloured through a 256-entry LUT.
- *  Each new frame costs one texSubImage2D row upload, independent of history length. */
+ *  Each new frame costs one texSubImage2D row upload, independent of history length.
+ *
+ *  Survives WebGL context loss (GPU driver reset, sleep/resume on Windows): `webglcontextlost` is
+ *  default-prevented so the browser may restore the context, every call is a no-op while it is
+ *  lost, and on `webglcontextrestored` all GPU resources are rebuilt (history starts empty) and
+ *  `onRestored` is called so the owner can redraw. */
 export class WaterfallRenderer {
   private gl: WebGL2RenderingContext;
-  private program: WebGLProgram;
-  private vao: WebGLVertexArrayObject;
-  private lutTex: WebGLTexture;
+  private program!: WebGLProgram;
+  private vao!: WebGLVertexArrayObject;
+  private lutTex!: WebGLTexture;
   private dataTex: WebGLTexture | null = null;
-  private uHead: WebGLUniformLocation;
+  private uHead!: WebGLUniformLocation;
+  private lut: Uint8Array;
   private head = 0;
   private w = 0;
   private h = 0;
+  private reqW = 0;
+  private reqH = 0;
+  private lost = false;
+  onRestored: (() => void) | null = null;
 
   constructor(private canvas: HTMLCanvasElement, lut: Uint8Array) {
     const gl = canvas.getContext("webgl2", { antialias: false, alpha: false });
     if (!gl) throw new Error("WebGL2 is not available, so the waterfall cannot be shown.");
     this.gl = gl;
+    this.lut = lut;
+    this.build();
+    canvas.addEventListener("webglcontextlost", this.handleLost);
+    canvas.addEventListener("webglcontextrestored", this.handleRestored);
+  }
+
+  get width(): number {
+    return this.w;
+  }
+
+  get contextLost(): boolean {
+    return this.lost;
+  }
+
+  private handleLost = (e: Event): void => {
+    e.preventDefault(); // without this the browser never fires webglcontextrestored
+    this.lost = true;
+    this.dataTex = null; // GPU objects of a lost context are invalid; nothing to delete
+  };
+
+  private handleRestored = (): void => {
+    this.lost = false;
+    this.build();
+    if (this.reqW > 0 && this.reqH > 0) this.resize(this.reqW, this.reqH);
+    this.onRestored?.();
+  };
+
+  /** Create the program, quad and LUT texture (on construction and after a context restore). */
+  private build(): void {
+    const gl = this.gl;
     const program = gl.createProgram()!;
     gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, VS));
     gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, FS));
@@ -71,14 +111,13 @@ export class WaterfallRenderer {
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.activeTexture(gl.TEXTURE1);
     this.lutTex = makeTexture(gl);
-    this.setColormap(lut);
-  }
-
-  get width(): number {
-    return this.w;
+    this.setColormap(this.lut);
   }
 
   resize(w: number, h: number): void {
+    this.reqW = w;
+    this.reqH = h;
+    if (this.lost) return; // applied on restore
     const gl = this.gl;
     const max = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
     this.w = Math.min(w, max);
@@ -92,6 +131,8 @@ export class WaterfallRenderer {
   }
 
   setColormap(lut: Uint8Array): void {
+    this.lut = lut;
+    if (this.lost) return;
     const gl = this.gl;
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, this.lutTex);
@@ -99,7 +140,7 @@ export class WaterfallRenderer {
   }
 
   pushRow(row: Uint8Array): void {
-    if (!this.dataTex || row.length !== this.w) return;
+    if (this.lost || !this.dataTex || row.length !== this.w) return;
     const gl = this.gl;
     this.head = (this.head + 1) % this.h;
     gl.activeTexture(gl.TEXTURE0);
@@ -108,7 +149,7 @@ export class WaterfallRenderer {
   }
 
   draw(): void {
-    if (!this.dataTex) return;
+    if (this.lost || !this.dataTex) return;
     const gl = this.gl;
     gl.useProgram(this.program);
     gl.bindVertexArray(this.vao);
@@ -121,6 +162,10 @@ export class WaterfallRenderer {
   }
 
   dispose(): void {
+    this.canvas.removeEventListener("webglcontextlost", this.handleLost);
+    this.canvas.removeEventListener("webglcontextrestored", this.handleRestored);
+    this.onRestored = null;
+    if (this.lost) return;
     const gl = this.gl;
     if (this.dataTex) gl.deleteTexture(this.dataTex);
     gl.deleteTexture(this.lutTex);

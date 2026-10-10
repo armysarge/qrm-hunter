@@ -30,6 +30,10 @@
       return;
     }
     const r = renderer;
+    // After a GPU reset the renderer rebuilds itself (with empty history); just redraw.
+    r.onRestored = () => {
+      dirty = true;
+    };
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     const applySize = () => {
       const dpr = devicePixelRatio || 1;
