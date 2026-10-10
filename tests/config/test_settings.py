@@ -69,3 +69,45 @@ def test_corrupt_file_that_cannot_be_moved_aside_falls_back(tmp_path, monkeypatc
         assert SettingsStore(path).load() == Settings()
     assert "could not be moved aside" in caplog.text
     assert path.exists() and not (tmp_path / "s.toml.bad").exists()
+
+
+def test_save_after_unreadable_load_backs_up_original(tmp_path, monkeypatch):
+    path = tmp_path / "s.toml"
+    path.write_text('region = 2\ntoken = "keep-me"\n', encoding="utf-8")
+    store = SettingsStore(path)
+
+    def locked(self, *a, **kw):
+        raise PermissionError(13, "The process cannot access the file", str(self))
+
+    monkeypatch.setattr(type(path), "read_text", locked)
+    assert store.load() == Settings()
+    monkeypatch.undo()
+    store.save(Settings(region=3))
+    assert 'token = "keep-me"' in (tmp_path / "s.toml.bak").read_text(encoding="utf-8")
+    assert store.load().region == 3
+    store.save(Settings(region=1))  # flag cleared: no second backup overwrite needed
+    assert 'token = "keep-me"' in (tmp_path / "s.toml.bak").read_text(encoding="utf-8")
+
+
+def test_save_after_unreadable_load_skips_when_backup_fails(tmp_path, monkeypatch, caplog):
+    import shutil
+
+    path = tmp_path / "s.toml"
+    path.write_text("region = 2\n", encoding="utf-8")
+    store = SettingsStore(path)
+
+    def locked(self, *a, **kw):
+        raise PermissionError(13, "The process cannot access the file", str(self))
+
+    monkeypatch.setattr(type(path), "read_text", locked)
+    store.load()
+    monkeypatch.undo()
+
+    def busy(*a, **kw):
+        raise PermissionError(32, "busy", str(path))
+
+    monkeypatch.setattr(shutil, "copy2", busy)
+    with caplog.at_level("WARNING"):
+        store.save(Settings(region=3))  # must not raise, must not overwrite
+    assert "not overwriting" in caplog.text
+    assert path.read_text(encoding="utf-8") == "region = 2\n"
