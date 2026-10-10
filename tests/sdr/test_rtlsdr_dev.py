@@ -12,8 +12,8 @@ class FakeRtl:
         self.ds_sets = 0
         self._rate = None
         self.rate_sets = 0
-        self.center_freq = None
-        self.gain = None
+        self.center_sets = []
+        self.gain_sets = []
         self.bias = None
         self.ppm_sets = []
         self.closed = False
@@ -26,6 +26,22 @@ class FakeRtl:
     @freq_correction.setter
     def freq_correction(self, v):
         self.ppm_sets.append(v)
+
+    @property
+    def center_freq(self):
+        return self.center_sets[-1] if self.center_sets else None
+
+    @center_freq.setter
+    def center_freq(self, v):
+        self.center_sets.append(v)
+
+    @property
+    def gain(self):
+        return self.gain_sets[-1] if self.gain_sets else None
+
+    @gain.setter
+    def gain(self, v):
+        self.gain_sets.append(v)
 
     @property
     def sample_rate(self):
@@ -129,3 +145,36 @@ def test_close_is_idempotent():
     d.close()
     d.close()
     assert fake.closed
+
+
+def test_gain_change_does_not_retune_and_unchanged_settings_are_not_rewritten():
+    d, (fake,) = make()
+    d.configure(DeviceConfig(center_hz=7.1e6, gain_db=10.0))
+    d.configure(DeviceConfig(center_hz=7.1e6, gain_db=10.0))
+    assert (fake.center_sets, fake.gain_sets) == ([7.1e6], [10.0])
+    for g in (11.0, 12.0, None):  # dragging the gain slider, then auto
+        d.configure(DeviceConfig(center_hz=7.1e6, gain_db=g))
+    assert fake.center_sets == [7.1e6]  # no PLL re-tune per gain tick
+    assert fake.gain_sets == [10.0, 11.0, 12.0, "auto"]
+    d.configure(DeviceConfig(center_hz=7.2e6, gain_db=None))
+    assert fake.center_sets == [7.1e6, 7.2e6] and fake.gain_sets[-1] == "auto" and len(fake.gain_sets) == 4
+
+
+def test_direct_sampling_and_rate_changes_rewrite_frequency():
+    d, (fake,) = make()
+    d.configure(DeviceConfig(center_hz=7.1e6, gain_db=10.0))
+    d.configure(DeviceConfig(center_hz=7.1e6, gain_db=10.0, direct_sampling="q"))
+    assert fake.center_sets == [7.1e6, 7.1e6]  # the tuner was re-initialised
+    assert fake.gain_sets == [10.0, 10.0]
+    d.configure(DeviceConfig(center_hz=7.1e6, sample_rate=1_024_000.0, gain_db=10.0, direct_sampling="q"))
+    assert fake.center_sets == [7.1e6] * 3
+    assert fake.gain_sets == [10.0, 10.0]
+
+
+def test_reopen_rewrites_everything():
+    d, fakes = make()
+    d.configure(DeviceConfig(center_hz=7.1e6, gain_db=10.0))
+    d.close()
+    d.open()
+    d.configure(DeviceConfig(center_hz=7.1e6, gain_db=10.0))
+    assert (fakes[1].center_sets, fakes[1].gain_sets) == ([7.1e6], [10.0])

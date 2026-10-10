@@ -11,6 +11,7 @@ from .base import DeviceConfig, DeviceError, DeviceInfo, apply_limits
 RTL_RATES = (250_000.0, 1_024_000.0, 1_536_000.0, 1_792_000.0, 1_920_000.0, 2_048_000.0,
              2_160_000.0, 2_400_000.0, 2_560_000.0, 2_880_000.0, 3_200_000.0)
 _DIRECT = {"off": 0, "i": 1, "q": 2}
+_UNSET = object()
 _LIBRARY_MISSING_MSG = (
     "the RTL-SDR library (librtlsdr / pyrtlsdrlib) is not installed or could not be loaded: {exc}. "
     "Install pyrtlsdr and librtlsdr, or put librtlsdr.dll next to the application on Windows."
@@ -48,6 +49,8 @@ class RtlSdrDevice:
         self._ppm = 0
         self._direct: str | None = None
         self._rate: float | None = None
+        self._center: Any = _UNSET
+        self._gain: Any = _UNSET
 
     def open(self) -> None:
         if self._sdr is not None:
@@ -71,6 +74,8 @@ class RtlSdrDevice:
         self._ppm = 0
         self._direct = None
         self._rate = None
+        self._center = _UNSET
+        self._gain = _UNSET
 
     def close(self) -> None:
         if self._sdr is not None:
@@ -84,19 +89,28 @@ class RtlSdrDevice:
         sdr = self._require()
         applied = apply_limits(self.info, cfg)
         try:
-            # Direct sampling and sample rate re-initialise the tuner/demodulator in librtlsdr,
-            # so they are only written when they actually change.
+            # Every write here costs librtlsdr a tuner/PLL reprogram (a click in the audio and a
+            # glitch in the spectrum), so each setting is only written when it actually changes.
+            # Toggling direct sampling re-initialises the tuner, so frequency and gain follow it;
+            # a rate change alters the tuner's IF bandwidth, so the frequency is rewritten too.
+            retuner = retune = False
             if applied.direct_sampling != self._direct:
                 sdr.set_direct_sampling(_DIRECT[applied.direct_sampling])
                 self._direct = applied.direct_sampling
+                retuner = retune = True
             if applied.sample_rate != self._rate:
                 sdr.sample_rate = applied.sample_rate
                 self._rate = applied.sample_rate
-            sdr.center_freq = applied.center_hz
+                retune = True
+            if retune or applied.center_hz != self._center:
+                sdr.center_freq = applied.center_hz
+                self._center = applied.center_hz
             if applied.ppm != self._ppm:
                 sdr.freq_correction = applied.ppm
                 self._ppm = applied.ppm
-            sdr.gain = "auto" if applied.gain_db is None else applied.gain_db
+            if retuner or applied.gain_db != self._gain:
+                sdr.gain = "auto" if applied.gain_db is None else applied.gain_db
+                self._gain = applied.gain_db
             if hasattr(sdr, "set_bias_tee"):
                 sdr.set_bias_tee(applied.bias_tee)
         except Exception as exc:

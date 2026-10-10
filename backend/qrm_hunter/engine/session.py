@@ -205,10 +205,13 @@ class RadioSession:
                         raise DeviceError("device not responding")
                     try:
                         applied = device.configure(self._device_config(new))
-                        self._gen += 1
                     finally:
                         self._dev_lock.release()
                     new = self._with_applied(new, applied)
+                    # Blocks are labelled with centre and rate; only a change to either makes
+                    # in-flight blocks and the pending frame stale. Gain/ppm changes keep them.
+                    if (new.center_hz, new.sample_rate) != (old.center_hz, old.sample_rate):
+                        self._gen += 1
                 self._apply_dsp(old, new, plan)
             self._state = new
         self._publish_state()

@@ -442,3 +442,15 @@ def test_device_loss_turns_audio_off():
     assert session.state.audio is False
     session.close()
 
+
+def test_gain_change_keeps_generation_but_retune_bumps_it(session):
+    session.open("synthetic", StatePatch(tune_hz=7_100_000.0, gain_db=20.0))
+    gen = session._gen
+    session.update(StatePatch(gain_db=30.0))
+    session.update(StatePatch(gain_db=None))
+    session.update(StatePatch(tune_hz=7_110_000.0))  # inside the span: no recentre
+    assert session._gen == gen  # in-flight blocks and the pending frame stay valid
+    session.update(StatePatch(center_hz=8_000_000.0))
+    assert session._gen == gen + 1
+    session.update(StatePatch(sample_rate=1_024_000.0))
+    assert session._gen == gen + 2
