@@ -92,8 +92,8 @@ class SyntheticDevice:
         t = (n0 + np.arange(n)) / rate
         sigma = np.sqrt(10 ** (self.noise_db / 10) / 2)
         x = self._rng.normal(0.0, sigma, n) + 1j * self._rng.normal(0.0, sigma, n)
-        for src in self.sources:
-            part = self._render(src, t, n0, fc, rate)
+        for i, src in enumerate(self.sources):
+            part = self._render(src, i, t, n0, fc, rate)
             if part is not None:
                 x += part
         if self._cfg.gain_db is not None:
@@ -105,7 +105,7 @@ class SyntheticDevice:
 
     # --- rendering -------------------------------------------------------------------------
 
-    def _render(self, src: Source, t: np.ndarray, n0: int, fc: float, rate: float):
+    def _render(self, src: Source, index: int, t: np.ndarray, n0: int, fc: float, rate: float):
         amp = 10 ** (src.level_db / 20)
         p = src.params
         half = rate / 2
@@ -125,7 +125,7 @@ class SyntheticDevice:
         if src.kind == "ofdm":
             return self._ofdm(src, t, n0, fc, rate, amp)
         if src.kind == "impulses":
-            return self._impulses(src, t.size, n0, rate, amp)
+            return self._impulses(src, index, t.size, n0, rate, amp)
         raise ValueError(f"unknown source kind {src.kind!r}")
 
     def _comb(self, src, t, fc, rate, amp):
@@ -139,7 +139,8 @@ class SyntheticDevice:
             return None
         count = k_hi - k_lo + 1
         f0 = src.freq_hz + k_lo * s - fc
-        # sum_{k<count} r^k in closed form: a comb of equal lines with fixed, decorrelated phases
+        # sum_{k<count} r^k in closed form: a coherent pulse train, each line a fixed phase step
+        # (2*pi*s*t + golden angle) apart from its neighbour
         r = np.exp(1j * (2 * np.pi * s * t + _GOLDEN_ANGLE))
         den = 1 - r
         small = np.abs(den) < 1e-9
@@ -168,27 +169,31 @@ class SyntheticDevice:
         off = src.freq_hz - fc
         if off >= rate / 2 or off + bw <= -rate / 2:
             return None
-        key = (rate, bw, spacing)
+        key = (rate, bw, spacing, off)
         wave = self._ofdm_cache.get(key)
         if wave is None:
-            wave = self._ofdm_cache[key] = _ofdm_wave(rate, bw, spacing, self._seed)
+            wave = self._ofdm_cache[key] = _ofdm_wave(rate, bw, spacing, self._seed, shift_hz=off)
         idx = (n0 + np.arange(t.size)) % wave.size
         return amp * wave[idx] * np.exp(2j * np.pi * off * t)
 
-    def _impulses(self, src, n, n0, rate, amp):
+    def _impulses(self, src, index, n, n0, rate, amp):
+        """Bursts are generated per burst index from a seeded RNG, so their content does not
+        depend on how reads are chunked; a burst straddling a read boundary is split across reads."""
         p = src.params
         r = p.get("rate_hz", 100.0)
         length = int(p.get("burst_len", 32))
         out = np.zeros(n, np.complex128)
-        t0, t1 = n0 / rate, (n0 + n) / rate
         decay = np.exp(-np.arange(length) / (length / 4))
-        for m in range(int(np.ceil(t0 * r)), int(np.ceil(t1 * r))):
-            start = int(round(m / r * rate)) - n0
-            if not 0 <= start < n:
+        m_lo = int(np.floor((n0 - length) / rate * r))
+        m_hi = int(np.ceil((n0 + n) / rate * r)) + 1
+        for m in range(max(m_lo, 0), m_hi):
+            s = int(round(m / r * rate))  # absolute start sample of burst m
+            if s >= n0 + n or s + length <= n0:
                 continue
-            seg = min(length, n - start)
-            noise = self._rng.normal(size=seg) + 1j * self._rng.normal(size=seg)
-            out[start:start + seg] += noise * decay[:seg] * (amp / np.sqrt(2))
+            rng = np.random.default_rng([self._seed, index, m])
+            burst = (rng.normal(size=length) + 1j * rng.normal(size=length)) * decay * (amp / np.sqrt(2))
+            a, b = max(s, n0), min(s + length, n0 + n)
+            out[a - n0:b - n0] += burst[a - s:b - s]
         return out
 
     def _pace(self, n: int, rate: float) -> None:
@@ -201,11 +206,16 @@ class SyntheticDevice:
             self._paced = 0
 
 
-def _ofdm_wave(rate: float, bw: float, spacing: float, seed: int,
+def _ofdm_wave(rate: float, bw: float, spacing: float, seed: int, shift_hz: float = 0.0,
                symbols: int = 64, symbol_rate: float = 4000.0) -> np.ndarray:
-    """A looped VDSL-like OFDM block: QPSK carriers every `spacing` Hz, new phases each symbol."""
+    """A looped VDSL-like OFDM block: QPSK carriers every `spacing` Hz, new phases each symbol.
+
+    The block is built at baseband (carriers 0..bw) and normalised to unit total power, then
+    every spectral bin that would fall outside the device span once shifted by `shift_hz` is
+    zeroed. Carriers past the edge are removed, not wrapped to the far side of the span.
+    """
     rng = np.random.default_rng(seed + 7)
-    seg = max(1, int(round(rate / symbol_rate)))
+    seg = max(1, round(rate / symbol_rate))
     length = seg * symbols
     t = np.arange(length) / rate
     carriers = np.arange(int(bw // spacing)) * spacing
@@ -215,4 +225,8 @@ def _ofdm_wave(rate: float, bw: float, spacing: float, seed: int,
     for j, f in enumerate(carriers):
         wave += np.exp(1j * (2 * np.pi * f * t + phases[sym, j]))
     wave /= np.sqrt(np.mean(np.abs(wave) ** 2))
-    return wave.astype(np.complex64)
+    # Shifting by off moves bin frequency f to f + off; keep only bins inside the span.
+    spec = np.fft.fft(wave)
+    f = np.fft.fftfreq(length, 1 / rate) + shift_hz
+    spec[(f < -rate / 2) | (f >= rate / 2)] = 0
+    return np.fft.ifft(spec).astype(np.complex64)

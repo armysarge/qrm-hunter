@@ -82,3 +82,70 @@ def test_realtime_pacing():
 def test_configure_before_open_raises():
     with pytest.raises(DeviceError):
         SyntheticDevice(realtime=False).configure(DeviceConfig())
+
+
+def test_ofdm_does_not_alias_outside_span():
+    # carriers 7.3-7.7 MHz, span 6.588-7.612 MHz: the 7.612-7.7 MHz part must vanish, not wrap
+    src = Source("ofdm", 7_300_000.0, -20.0, {"bw_hz": 400_000.0, "spacing_hz": 4312.5})
+    d = make(sources=[src], noise_db=-120.0)
+    rate = 1_024_000.0
+    d.configure(DeviceConfig(center_hz=7_100_000.0, sample_rate=rate))
+    s = spectrum_db(d.read(65536))
+    f = (np.arange(s.size) - s.size // 2) * rate / s.size
+    inband = s[(f >= 220_000.0) & (f <= 380_000.0)]
+    alias = s[(f >= -500_000.0) & (f <= -440_000.0)]  # where wrapped carriers would land
+    assert alias.mean() < inband.mean() - 25.0
+
+
+def _burst_chunks(x: np.ndarray, chunk: int) -> int:
+    energy = np.sum(np.abs(x.reshape(-1, chunk)) ** 2, axis=1)
+    return int(np.count_nonzero(energy > 1e-6))
+
+
+def test_impulse_bursts_per_second_match_rate_hz():
+    src = Source("impulses", 0.0, -10.0, {"rate_hz": 100.0, "burst_len": 32})
+    rate = 1_024_000.0  # bursts start every 10 240 samples, i.e. on 1024-sample chunk boundaries
+    d = make(sources=[src], noise_db=-300.0)
+    d.configure(DeviceConfig(center_hz=7_100_000.0, sample_rate=rate))
+    assert _burst_chunks(d.read(int(rate)), 1024) == 100
+
+
+def test_impulse_bursts_are_independent_of_read_chunking():
+    src = Source("impulses", 0.0, -10.0, {"rate_hz": 100.0, "burst_len": 32})
+
+    def run(sizes):
+        d = make(sources=[src], noise_db=-300.0)
+        d.configure(DeviceConfig(center_hz=7_100_000.0, sample_rate=1_024_000.0))
+        return np.concatenate([d.read(n) for n in sizes])
+
+    whole = run([20_480])
+    split = run([10_250, 10_230])  # second burst starts at 10 240: the cut is 10 samples into it
+    assert np.count_nonzero(whole) > 0
+    # Thermal noise (noise_db=-300, ~1e-15) comes from the chunk-dependent RNG stream; bursts are
+    # ~0.3 in amplitude, so a 1e-9 tolerance still catches any truncated or duplicated burst.
+    assert np.allclose(whole, split, rtol=0, atol=1e-9)
+
+
+def test_buzz_power_and_centre():
+    src = Source("buzz", 7_150_000.0, -20.0, {"bw_hz": 120_000.0, "am_hz": 100.0})
+    d = make(sources=[src], noise_db=-120.0)
+    d.configure(DeviceConfig(center_hz=7_100_000.0, sample_rate=RATE))
+    x = d.read(262144)
+    p_db = 10 * np.log10(np.mean(np.abs(x) ** 2))
+    assert abs(p_db - (-20.0)) < 1.0
+    p = np.abs(np.fft.fftshift(np.fft.fft(x))) ** 2
+    f = (np.arange(p.size) - p.size // 2) * RATE / p.size
+    centroid = np.sum(f * p) / np.sum(p)
+    assert abs(centroid - 50_000.0) < 5_000.0
+
+
+@pytest.mark.parametrize("depth", [0.5, 1.0])
+def test_am_broadcast_sidebands_follow_depth(depth):
+    src = Source("am_broadcast", 7_100_000.0, -20.0, {"tone_hz": 1000.0, "depth": depth})
+    d = make(sources=[src], noise_db=-150.0)
+    d.configure(DeviceConfig(center_hz=7_100_000.0, sample_rate=RATE))
+    n = 65536  # 1000 Hz falls exactly on bin 32, so no window is needed
+    X = np.abs(np.fft.fft(d.read(n))) / n
+    expected_db = 20 * np.log10(depth / 2)  # each sideband is depth/2 of the carrier
+    for k in (32, n - 32):
+        assert abs(20 * np.log10(X[k] / X[0]) - expected_db) < 0.5
