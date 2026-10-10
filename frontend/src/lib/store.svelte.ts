@@ -205,49 +205,68 @@ export async function saveSettings(patch: SettingsPatch): Promise<void> {
 
 // --- Frequency memories ---
 
+// Bumped by every fetch and every local change, so an older in-flight list cannot overwrite newer data.
+let memorySeq = 0;
+
 export async function refreshMemories(): Promise<void> {
+  const seq = ++memorySeq;
   try {
-    app.memories = (await listMemories()).sort(byFrequency);
+    const list = (await listMemories()).sort(byFrequency);
+    if (seq === memorySeq) app.memories = list;
   } catch (e) {
-    fail(e);
+    if (seq === memorySeq) fail(e);
   }
 }
 
-export async function saveMemory(fields: MemoryFields): Promise<boolean> {
+function setMemories(list: Memory[]): void {
+  memorySeq++;
+  app.memories = list.sort(byFrequency);
+}
+
+const message = (e: unknown) => (e as Error).message || "Could not save the memory";
+
+/** Returns null on success or the error message (the dialog shows it inline). */
+export async function saveMemory(fields: MemoryFields): Promise<string | null> {
   try {
     const m = await createMemory(fields);
-    app.memories = [...app.memories.filter((x) => x.id !== m.id), m].sort(byFrequency);
-    return true;
+    setMemories([...app.memories.filter((x) => x.id !== m.id), m]);
+    return null;
   } catch (e) {
-    fail(e);
-    return false;
+    return message(e);
   }
 }
 
-export async function editMemory(id: string, patch: Partial<MemoryFields>): Promise<boolean> {
+/** Returns null on success or the error message (the dialog shows it inline). */
+export async function editMemory(id: string, patch: Partial<MemoryFields>): Promise<string | null> {
   try {
     const m = await updateMemory(id, patch);
-    app.memories = app.memories.map((x) => (x.id === id ? m : x)).sort(byFrequency);
-    return true;
+    setMemories(app.memories.map((x) => (x.id === id ? m : x)));
+    return null;
   } catch (e) {
-    fail(e);
-    return false;
+    return message(e);
   }
 }
 
 export async function removeMemory(id: string): Promise<void> {
   try {
     await deleteMemory(id);
-    app.memories = app.memories.filter((x) => x.id !== id);
+    setMemories(app.memories.filter((x) => x.id !== id));
   } catch (e) {
     fail(e);
   }
 }
 
-/** Tune to a memory. While stopped it is shown and kept for Start, which opens with it. */
+/** The device a recall applies to: the running one, else the one Start would open. */
+function targetDevice(): DeviceInfo | undefined {
+  const id = app.radio?.running ? app.radio.device_id : app.selectedDevice;
+  return app.devices.find((d) => d.id === id);
+}
+
+/** Tune to a memory. While stopped (or before the state has loaded) it is shown and kept for
+ *  Start, which opens with it. */
 export async function recallMemory(m: Memory): Promise<void> {
   const r = app.radio;
-  const patch = recallPatch(m, r);
+  const patch = recallPatch(m, r, !!targetDevice()?.has_direct_sampling);
   if (r?.running) {
     app.pendingRecall = null;
     await setRadio(patch);

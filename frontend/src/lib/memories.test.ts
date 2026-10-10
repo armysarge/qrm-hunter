@@ -30,8 +30,15 @@ describe("naming and saving", () => {
 describe("recallPatch", () => {
   it("sends tune, mode and bandwidth, and gain/HF input only when the memory sets them", () => {
     expect(recallPatch(mem("a", 14_070_000), radio())).toEqual({ tune_hz: 14_070_000, mode: "USB", bw_hz: 2700 });
-    expect(recallPatch(mem("a", 14_070_000, { gain_db: 12.5, direct_sampling: "q" }), radio())).toEqual({
+    expect(recallPatch(mem("a", 14_070_000, { gain_db: 12.5, direct_sampling: "q" }), radio(), true)).toEqual({
       tune_hz: 14_070_000, mode: "USB", bw_hz: 2700, gain_db: 12.5, direct_sampling: "q" });
+  });
+  it("sends direct_sampling only to a device that has it, and only when it changes", () => {
+    const m = mem("a", 14_070_000, { direct_sampling: "q" });
+    expect("direct_sampling" in recallPatch(m, radio(), false)).toBe(false); // e.g. Airspy, synthetic
+    expect("direct_sampling" in recallPatch(m, radio({ direct_sampling: "q" }), true)).toBe(false); // unchanged
+    expect(recallPatch(m, radio({ direct_sampling: "off" }), true).direct_sampling).toBe("q");
+    expect(recallPatch(mem("b", 1e6), null, true)).toEqual({ tune_hz: 1e6, mode: "USB", bw_hz: 2700 });
   });
   it("keeps the AGC choice (gain_db null) out of the patch", () => {
     expect("gain_db" in recallPatch(mem("a", 14_070_000), radio())).toBe(false);
@@ -46,6 +53,9 @@ describe("recallPatch", () => {
     const pending = recallPatch(mem("a", 7_074_000, { gain_db: 30 }), radio({ running: false }));
     expect(openConfig(7_074_000, pending)).toEqual({ tune_hz: 7_074_000, mode: "USB", bw_hz: 2700, gain_db: 30 });
     expect(openConfig(7_100_000, null)).toEqual({ tune_hz: 7_100_000 });
+  });
+  it("lets the recalled frequency win over the displayed one", () => {
+    expect(openConfig(14_175_000, { tune_hz: 7_074_000, mode: "LSB" })).toEqual({ tune_hz: 7_074_000, mode: "LSB" });
   });
 });
 
@@ -90,6 +100,18 @@ describe("layoutMarkers", () => {
     const out = layoutMarkers([mem("aaaa", 100)], view, 1000, measure);
     expect(markerAt(out, 120)?.memory.name).toBe("aaaa");
     expect(markerAt(out, 140)).toBeNull();
+  });
+  it("keeps labels inside the right edge, with the box covering tick and label", () => {
+    const [k] = layoutMarkers([mem("edge", 995)], view, 1000, measure); // label is 24 px wide
+    expect(k.x).toBe(995);
+    expect(k.labelX).toBe(1000 - 2 - 24);
+    expect(k.x0).toBe(974);
+    expect(k.x1).toBe(998);
+    expect(markerAt([k], 980)?.memory.name).toBe("edge");
+  });
+  it("skips a marker that collides with an edge-clamped label", () => {
+    const out = layoutMarkers([mem("left", 960), mem("edge", 995)], view, 1000, measure);
+    expect(out.map((k) => k.memory.name)).toEqual(["left"]);
   });
   it("returns nothing for an empty view", () => {
     expect(layoutMarkers([mem("a", 1)], { loHz: 0, hiHz: 0 }, 100, measure)).toEqual([]);

@@ -10,6 +10,7 @@
   let name = $state(editing?.name ?? (r ? defaultName(r.tune_hz, r.mode) : ""));
   let note = $state(editing?.note ?? "");
   let busy = $state(false);
+  let error = $state<string | null>(null);
   let dialog: HTMLDialogElement;
   let nameInput: HTMLInputElement;
   const tune = editing?.tune_hz ?? r?.tune_hz ?? 0;
@@ -25,11 +26,11 @@
     e.preventDefault();
     if (!valid || busy) return;
     busy = true;
-    const ok = editing
+    error = editing
       ? await editMemory(editing.id, { name: name.trim(), note })
-      : r ? await saveMemory(memoryFromRadio(r, name.trim(), note)) : false;
+      : r ? await saveMemory(memoryFromRadio(r, name.trim(), note)) : "Radio state not loaded yet";
     busy = false;
-    if (ok) dialog.close();
+    if (error === null) dialog.close();
   }
 </script>
 
@@ -46,6 +47,11 @@
       <span class="lbl label-sm">Note</span>
       <textarea bind:value={note} maxlength="500" rows="3" aria-label="Memory note" placeholder="Optional"></textarea>
     </label>
+    {#if error}
+      <p class="error" role="alert">
+        <span class="material-symbols-rounded" aria-hidden="true">error</span>{error}
+      </p>
+    {/if}
     <div class="actions">
       <button type="button" class="text" onclick={() => dialog.close()}>Cancel</button>
       <button type="submit" class="text" disabled={!valid || busy}>{editing ? "Save changes" : "Save"}</button>
@@ -82,5 +88,16 @@
     font: inherit;
   }
   textarea:focus { outline: none; border: 2px solid var(--md-primary); padding: 9px 11px; }
+  .error {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin: -4px 0 0;
+    color: var(--md-error);
+    font-size: 12px;
+    line-height: 16px;
+    overflow-wrap: anywhere;
+  }
+  .error .material-symbols-rounded { font-size: 16px; }
   .actions { display: flex; justify-content: flex-end; gap: 8px; }
 </style>

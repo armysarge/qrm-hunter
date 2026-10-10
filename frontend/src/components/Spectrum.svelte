@@ -100,7 +100,7 @@
       for (const k of markers) {
         const x = Math.round(k.x * dpr);
         ctx.fillRect(x, 0, Math.max(1, Math.round(dpr)), (MARKER_TOP + MARKER_H) * dpr);
-        ctx.fillText(k.label, x + 4 * dpr, (MARKER_TOP + 11) * dpr);
+        ctx.fillText(k.label, k.labelX * dpr, (MARKER_TOP + 11) * dpr);
       }
     }
 

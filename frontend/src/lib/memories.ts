@@ -14,23 +14,28 @@ export function memoryFromRadio(r: RadioState, name: string, note = ""): MemoryF
 
 export const byFrequency = (a: Memory, b: Memory) => a.tune_hz - b.tune_hz || a.name.localeCompare(b.name);
 
-/** The PATCH /api/state body that recalls `m`. gain_db/direct_sampling are only sent when the memory
- *  sets them. If the frequency is outside the receiver's usable span, the centre moves with it
- *  (same placement the engine uses: tune + rate/4), so the jump is one retune. */
-export function recallPatch(m: Memory, r: RadioState | null): StatePatch {
+/** The PATCH /api/state body that recalls `m`. gain_db is only sent when the memory sets it.
+ *  direct_sampling is only sent when the memory sets it, the device has direct sampling and it
+ *  differs from the current setting (other devices ignore it, but it would cost a reconfigure).
+ *  If the frequency is outside the receiver's usable span, the centre moves with it (same
+ *  placement the engine uses: tune + rate/4), so the jump is one retune. */
+export function recallPatch(m: Memory, r: RadioState | null, hasDirectSampling = false): StatePatch {
   const patch: StatePatch = { tune_hz: m.tune_hz, mode: m.mode, bw_hz: m.bw_hz };
   if (m.gain_db !== null) patch.gain_db = m.gain_db;
-  if (m.direct_sampling !== null) patch.direct_sampling = m.direct_sampling;
+  if (m.direct_sampling !== null && hasDirectSampling && m.direct_sampling !== r?.direct_sampling) {
+    patch.direct_sampling = m.direct_sampling;
+  }
   if (r && Math.abs(m.tune_hz - r.center_hz) > SPAN_USABLE * r.sample_rate) {
     patch.center_hz = m.tune_hz + r.sample_rate / 4;
   }
   return patch;
 }
 
-/** The open() config for Start after a memory was recalled while stopped (open recentres itself). */
+/** The open() config for Start. A memory recalled while stopped wins over the displayed tune (a
+ *  state event may have replaced it since); open() recentres itself, so the centre is dropped. */
 export function openConfig(tuneHz: number, pending: StatePatch | null): StatePatch {
   const { center_hz: _ignored, ...rest } = pending ?? {};
-  return { ...rest, tune_hz: tuneHz };
+  return { ...rest, tune_hz: rest.tune_hz ?? tuneHz };
 }
 
 export function matchesQuery(m: Memory, query: string): boolean {
@@ -63,10 +68,11 @@ export function importFormat(filename: string): ImportFormat | null {
 
 export const truncate = (s: string, max: number) => (s.length > max ? `${s.slice(0, Math.max(1, max - 1))}…` : s);
 
-export interface Marker { memory: Memory; x: number; label: string; x0: number; x1: number; }
+export interface Marker { memory: Memory; x: number; label: string; labelX: number; x0: number; x1: number; }
 
-/** Marker positions (CSS px) for memories inside `view`. Labels start at the tick; a marker whose
- *  label box would overlap the previous kept one is skipped (greedy, left to right). */
+/** Marker positions (CSS px) for memories inside `view`. A label starts just right of its tick, or
+ *  ends at the right edge when it would not fit; a marker whose box (tick + label) would overlap the
+ *  previous kept one is skipped (greedy, left to right). */
 export function layoutMarkers(memories: Memory[], view: View, width: number, measure: (s: string) => number,
   maxChars = 14, gap = 6): Marker[] {
   const out: Marker[] = [];
@@ -77,10 +83,12 @@ export function layoutMarkers(memories: Memory[], view: View, width: number, mea
   for (const m of visible) {
     const x = hzToX(m.tune_hz, view, width);
     const label = truncate(m.name, maxChars);
-    const x0 = x - 2;
-    const x1 = x + 4 + measure(label);
+    const w = measure(label);
+    const labelX = Math.max(0, Math.min(x + 4, width - 2 - w));
+    const x0 = Math.min(x - 2, labelX);
+    const x1 = Math.max(x + 2, labelX + w);
     if (x0 < right + gap) continue;
-    out.push({ memory: m, x, label, x0, x1 });
+    out.push({ memory: m, x, label, labelX, x0, x1 });
     right = x1;
   }
   return out;

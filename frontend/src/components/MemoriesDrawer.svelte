@@ -12,6 +12,8 @@
   let fileInput: HTMLInputElement;
   let confirmDialog = $state<HTMLDialogElement>();
 
+  // Keys 1–9 recall the first nine memories in frequency order (the whole list, not the search hits).
+  const shortcuts = $derived(new Map(app.memories.slice(0, 9).map((m, i) => [m.id, String(i + 1)])));
   const groups = $derived(groupByBand(app.memories.filter((m) => matchesQuery(m, query)), app.bands));
   const close = () => (app.memoriesOpen = false);
 
@@ -95,7 +97,9 @@
         {#each g.items as m (m.id)}
           <div class="row" class:menu-open={menuFor === m.id}>
             <button class="recall" onclick={() => recallMemory(m)} title="Recall {m.name}">
-              <span class="name">{m.name}</span>
+              <span class="name">
+                {#if shortcuts.has(m.id)}<kbd class="key label-sm" title="Press {shortcuts.get(m.id)} to recall">{shortcuts.get(m.id)}</kbd>{/if}{m.name}
+              </span>
               <span class="meta">
                 <span class="freq num">{formatHz(m.tune_hz)}</span>
                 <span class="chip label-sm">{m.mode}</span>
@@ -232,6 +236,17 @@
     text-align: left;
   }
   .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; font-size: 14px; }
+  .key {
+    display: inline-block;
+    min-width: 18px;
+    margin-right: 8px;
+    padding: 0 4px;
+    border: 1px solid var(--md-outline-variant);
+    border-radius: var(--md-shape-xs);
+    color: var(--md-on-surface-variant);
+    font-family: var(--sans);
+    text-align: center;
+  }
   .meta { display: flex; align-items: center; gap: 8px; justify-self: end; }
   .freq { color: var(--md-primary); font-weight: 500; }
   .chip {

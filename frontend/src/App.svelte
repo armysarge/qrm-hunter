@@ -23,6 +23,8 @@
 
   const events = new ReconnectingSocket("/ws/events", {
     onStatus: (ok) => (app.connected = ok),
+    // Memory events sent while disconnected were missed: refetch on every (re)connect.
+    onOpen: () => void refreshMemories(),
     onMessage: (ev) => {
       const msg = JSON.parse(ev.data as string) as ServerEvent;
       if (msg.type === "state") app.radio = msg.state;
@@ -113,7 +115,7 @@
   function onKey(e: KeyboardEvent) {
     if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
     if ((e.target as HTMLElement).closest("input, select, textarea")) return;
-    if (app.memoryDialog) return; // a modal is open
+    if (document.querySelector("dialog[open]")) return; // a modal (save/edit, delete confirm) is open
     const mk = memoryKey(e, false);
     if (mk?.kind === "save" && app.radio) {
       e.preventDefault();
