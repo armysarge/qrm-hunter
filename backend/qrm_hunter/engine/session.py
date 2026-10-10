@@ -55,6 +55,7 @@ class RadioSession:
         self._lock = threading.RLock()  # guards state and DSP
         self._dev_lock = threading.Lock()  # held by the reader during read, by update during configure
         self._run: _Run | None = None
+        self._snapshot = RadioState()
         self._state = RadioState()
         self._stats = Stats()
         self._spectrum: SpectrumProcessor | None = None
@@ -67,6 +68,20 @@ class RadioSession:
         self.events: Broadcaster[dict] = Broadcaster(maxsize=64)
 
     # --- public API -------------------------------------------------------------------------
+
+    @property
+    def _state(self) -> RadioState:
+        return self._state_v
+
+    @_state.setter
+    def _state(self, value: RadioState) -> None:
+        self._state_v = value
+        self._snapshot = value.model_copy()  # single attribute assignment: readable without the lock
+
+    @property
+    def snapshot(self) -> RadioState:
+        """Lock-free copy of the latest state; safe to call from the event loop."""
+        return self._snapshot.model_copy()
 
     @property
     def state(self) -> RadioState:

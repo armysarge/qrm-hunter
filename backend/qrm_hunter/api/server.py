@@ -6,6 +6,7 @@ import asyncio
 import dataclasses
 import logging
 import secrets
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Callable
@@ -59,16 +60,21 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
                static_dir: Path | None = None,
                discover_fn: Callable[[], list[DeviceInfo]] = discover) -> FastAPI:
 
+    settings_lock = threading.Lock()
+
     def save_settings(**changes) -> Settings:
-        app.state.settings = Settings.model_validate({**app.state.settings.model_dump(), **changes})
-        store.save(app.state.settings)
-        return app.state.settings
+        with settings_lock:
+            app.state.settings = Settings.model_validate({**app.state.settings.model_dump(), **changes})
+            store.save(app.state.settings)
+            return app.state.settings
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         yield
-        await run_in_threadpool(session.close)
-        save_settings(last_tune_hz=int(session.state.tune_hz))
+        try:
+            await run_in_threadpool(session.close)
+        finally:
+            await run_in_threadpool(lambda: save_settings(last_tune_hz=int(session.snapshot.tune_hz)))
 
     app = FastAPI(title="QRM Hunter", lifespan=lifespan)
     app.state.settings = store.load()
@@ -80,7 +86,7 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
         auth = conn.headers.get("authorization", "")
         if auth.lower().startswith("bearer "):
             supplied = auth[7:]
-        return supplied is not None and secrets.compare_digest(supplied, token)
+        return supplied is not None and secrets.compare_digest(supplied.encode(), token.encode())
 
     def require_token(request: Request) -> None:
         if not authorized(request):
@@ -157,7 +163,7 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
         async def send() -> None:
             while True:
                 frame = await sub.queue.get()
-                st = session.state
+                st = session.snapshot
                 await ws.send_bytes(render_frame(frame, view, st.db_min, st.db_max))
 
         try:
@@ -204,7 +210,7 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
                 await ws.receive_text()
 
         async def send() -> None:
-            await ws.send_json({"type": "state", "state": session.state.model_dump()})
+            await ws.send_json({"type": "state", "state": session.snapshot.model_dump()})
             while True:
                 await ws.send_json(await sub.queue.get())
 

@@ -58,7 +58,7 @@ def test_bad_patch_is_422_and_state_unchanged(client, body):
     before = client.get("/api/state").json()
     r = client.patch("/api/state", json=body)
     assert r.status_code == 422
-    assert isinstance(r.json()["detail"], str) or r.json()["detail"]
+    assert isinstance(r.json()["detail"], str) and r.json()["detail"]
     assert client.get("/api/state").json() == before
 
 
@@ -144,3 +144,24 @@ def test_static_frontend_is_served(tmp_path):
     c, _, _ = make_client(tmp_path, token="t", static_dir=web)
     with c:
         assert "QRM Hunter" in c.get("/").text  # static files need no token
+
+
+def test_non_ascii_token_is_401_not_500(tmp_path):
+    c, _, _ = make_client(tmp_path, token="s3cret")
+    with c:
+        assert c.get("/api/state?token=%C3%A9").status_code == 401
+
+
+def test_patch_device_error_is_409(client, monkeypatch):
+    def boom(_patch):
+        raise DeviceError("device not responding")
+    monkeypatch.setattr(client.session, "update", boom)
+    r = client.patch("/api/state", json={"mode": "USB"})
+    assert r.status_code == 409 and "not responding" in r.json()["detail"]
+
+
+def test_open_state_error_is_422(client):
+    r = client.post("/api/session/open",
+                    json={"device_id": "synthetic", "config": {"mode": "CW", "bw_hz": 20000}})
+    assert r.status_code == 422 and r.json()["detail"]
+    assert client.get("/api/state").json()["running"] is False

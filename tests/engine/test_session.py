@@ -319,3 +319,34 @@ def test_rejected_reopen_keeps_running_radio(session):
     assert session.state == before
     assert session.state.running
     assert len(sdr_threads()) == 2
+
+
+def test_snapshot_readable_while_lock_held_and_tracks_updates():
+    s = RadioSession(factory)
+    s.open("synthetic", StatePatch(tune_hz=7_074_000))
+    try:
+        assert s.snapshot.tune_hz == 7_074_000
+        s.update(StatePatch(mode="USB"))
+        assert s.snapshot.mode == "USB"
+        held, release = threading.Event(), threading.Event()
+
+        def hold():
+            with s._lock:
+                held.set()
+                release.wait(5)
+
+        t = threading.Thread(target=hold)
+        t.start()
+        assert held.wait(2)
+        try:
+            result = []
+            r = threading.Thread(target=lambda: result.append(s.snapshot))
+            r.start()
+            r.join(0.5)
+            assert not r.is_alive() and result[0].mode == "USB"
+        finally:
+            release.set()
+            t.join()
+    finally:
+        s.close()
+    assert s.snapshot.running is False
