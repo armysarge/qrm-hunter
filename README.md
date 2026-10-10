@@ -2,7 +2,7 @@
 
 See, record, identify and hunt down HF interference (QRM) with common SDRs.
 
-Sub-project 1 (this release): a live spectrum and waterfall with click-to-tune, zoom/pan, HF band presets and AM/SSB/CW audio. It runs as a desktop window or headless on a Raspberry Pi. Recording, automatic QRM classification, a 24/7 logger, guided source hunting and a community QRM library come next (see `docs/superpowers/specs/`).
+Sub-project 1 (this release): a live spectrum and waterfall with click-to-tune, zoom/pan, HF band presets and AM/SSB/CW audio. It runs as a desktop window or headless on a Raspberry Pi. Recording, automatic QRM classification, a 24/7 logger, guided source hunting and a community QRM library.
 
 ![Live spectrum and waterfall on 40 m](docs/screenshots/sp1-40m.png)
 
