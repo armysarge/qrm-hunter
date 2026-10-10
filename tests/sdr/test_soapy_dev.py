@@ -133,6 +133,37 @@ def test_repeated_timeouts_raise():
         d.read(1024)
 
 
+def test_timeouts_must_be_consecutive_to_raise():
+    FakeDevice.script = [-1, -1, 512, -1, -1, 512]
+    d = SoapyDevice({"driver": "sdrplay"}, module=FakeSoapy)
+    d.open()
+    x = d.read(1024)
+    assert x.shape == (1024,) and np.all(x == 1)
+
+
+class ActivateFailsDevice(FakeDevice):
+    closed_streams: list = []
+
+    def activateStream(self, s):
+        raise RuntimeError("activate failed")
+
+    def closeStream(self, s):
+        ActivateFailsDevice.closed_streams.append(s)
+
+
+class ActivateFailsSoapy(FakeSoapy):
+    Device = ActivateFailsDevice
+
+
+def test_failed_activate_closes_stream_and_raises_device_error():
+    ActivateFailsDevice.closed_streams = []
+    d = SoapyDevice({"driver": "sdrplay"}, module=ActivateFailsSoapy)
+    with pytest.raises(DeviceError, match="activate failed"):
+        d.open()
+    assert ActivateFailsDevice.closed_streams == ["stream"]
+    assert d._dev is None and d._stream is None
+
+
 def test_missing_soapy_gives_install_hint(monkeypatch):
     import qrm_hunter.sdr.soapy_dev as mod
 

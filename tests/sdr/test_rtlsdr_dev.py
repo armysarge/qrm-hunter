@@ -9,7 +9,9 @@ class FakeRtl:
     def __init__(self, index):
         self.index = index
         self.ds = None
-        self.sample_rate = None
+        self.ds_sets = 0
+        self._rate = None
+        self.rate_sets = 0
         self.center_freq = None
         self.gain = None
         self.bias = None
@@ -25,8 +27,18 @@ class FakeRtl:
     def freq_correction(self, v):
         self.ppm_sets.append(v)
 
+    @property
+    def sample_rate(self):
+        return self._rate
+
+    @sample_rate.setter
+    def sample_rate(self, v):
+        self._rate = v
+        self.rate_sets += 1
+
     def set_direct_sampling(self, v):
         self.ds = v
+        self.ds_sets += 1
 
     def set_bias_tee(self, v):
         self.bias = v
@@ -63,6 +75,31 @@ def test_configure_maps_settings():
     assert fake.ppm_sets == []  # ppm 0 is the default and librtlsdr rejects setting it again
     d.configure(DeviceConfig(center_hz=7.1e6, gain_db=20.0, ppm=3))
     assert (fake.gain, fake.ppm_sets, fake.ds) == (20.0, [3], 0)
+
+
+def test_unchanged_direct_sampling_and_rate_are_not_rewritten():
+    d, (fake,) = make()
+    d.configure(DeviceConfig(center_hz=7.1e6, gain_db=10.0))
+    d.configure(DeviceConfig(center_hz=7.1e6, gain_db=20.0))
+    assert fake.gain == 20.0  # gain is still applied on every call
+    assert fake.ds_sets == 1
+    assert fake.rate_sets == 1
+
+
+def test_missing_library_is_reported_as_not_installed():
+    def no_lib(i):
+        raise ImportError("No module named 'rtlsdr'")
+
+    with pytest.raises(DeviceError, match="not installed or could not be loaded"):
+        RtlSdrDevice(0, factory=no_lib).open()
+
+
+def test_library_load_oserror_is_reported_as_not_installed():
+    def no_dll(i):
+        raise OSError("librtlsdr.dll not found")
+
+    with pytest.raises(DeviceError, match="not installed or could not be loaded"):
+        RtlSdrDevice(0, factory=no_dll).open()
 
 
 def test_read_returns_complex64():

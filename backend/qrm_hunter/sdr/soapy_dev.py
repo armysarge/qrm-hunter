@@ -67,6 +67,7 @@ class SoapyDevice:
         mod = self._module or soapy_module()
         if mod is None:
             raise DeviceError(SOAPY_MISSING_MSG)
+        dev = stream = None
         try:
             dev = mod.Device(self.args)
             rx = mod.SOAPY_SDR_RX
@@ -78,9 +79,13 @@ class SoapyDevice:
                                 gain_range=(g.minimum(), g.maximum()))
             stream = dev.setupStream(rx, mod.SOAPY_SDR_CF32)
             dev.activateStream(stream)
-        except DeviceError:
-            raise
         except Exception as exc:
+            if dev is not None and stream is not None:
+                try:
+                    dev.closeStream(stream)
+                except Exception:
+                    pass
+            dev = None  # drop the half-open device before reporting
             raise DeviceError(f"cannot open {self.info.label}: {exc}") from exc
         self._mod, self._dev, self._stream = mod, dev, stream
 
@@ -129,11 +134,12 @@ class SoapyDevice:
             sr = self._dev.readStream(self._stream, [buf[got:]], n - got, timeoutUs=500_000)
             if sr.ret > 0:
                 got += sr.ret
+                timeouts = 0
             elif sr.ret == mod.SOAPY_SDR_OVERFLOW:
                 self.overflows += 1
             elif sr.ret == mod.SOAPY_SDR_TIMEOUT:
                 timeouts += 1
-                if timeouts >= 3:
+                if timeouts >= 3:  # three consecutive timeouts, not three in total
                     raise DeviceError(f"no samples from {self.info.label} for 1.5 s (unplugged?)")
             else:
                 raise DeviceError(f"{self.info.label} read error {sr.ret}: {mod.errToStr(sr.ret)}")
