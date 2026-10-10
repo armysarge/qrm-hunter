@@ -6,8 +6,7 @@ import math
 from typing import Literal
 
 import numpy as np
-from numpy.lib.stride_tricks import sliding_window_view
-from scipy.signal import firwin, lfilter
+from scipy.signal import firwin, lfilter, lfilter_zi, upfirdn
 
 Mode = Literal["AM", "USB", "LSB", "CW"]
 DEFAULT_BW: dict[str, float] = {"AM": 6000.0, "USB": 2700.0, "LSB": 2700.0, "CW": 500.0}
@@ -66,7 +65,6 @@ class Decimator:
     def __init__(self, factor: int, cutoff: float = 0.8) -> None:
         self.factor = factor
         self.taps = firwin(10 * factor + 1, cutoff / factor) if factor > 1 else np.array([1.0])
-        self._rtaps = self.taps[::-1].astype(np.float32)
         self._hist = np.zeros(self.taps.size - 1, np.complex64)
         self._phase = 0  # index in the next block of the first sample to keep
 
@@ -77,8 +75,15 @@ class Decimator:
         if x.size == 0:
             return np.empty(0, np.complex64)
         buf = np.concatenate([self._hist, x])
-        windows = sliding_window_view(buf, self.taps.size)[self._phase::self.factor]
-        y = windows @ self._rtaps
+        n_win = buf.size - self.taps.size + 1  # number of full FIR windows
+        count = max(0, -(-(n_win - self._phase) // self.factor))
+        if count:
+            # taps-1 == 10*factor, so full-convolution index (taps-1 + m*factor) is output
+            # row (10 + m) of the decimated upfirdn result on buf[phase:].
+            full = upfirdn(self.taps, buf[self._phase:], up=1, down=self.factor)
+            y = full[10:10 + count]
+        else:
+            y = np.empty(0, np.complex64)
         self._hist = buf[buf.size - (self.taps.size - 1):].copy()
         self._phase = (self._phase - x.size) % self.factor
         return y.astype(np.complex64)
@@ -93,9 +98,12 @@ class Demodulator:
         self.out_rate = self.in_rate / math.prod(factors)
         self.agc_enabled = agc
         self._nco_phase = 0.0
+        self._rot_key: tuple[int, float] | None = None
+        self._rot = np.empty(0, np.complex64)
         self._bfo_phase = 0.0
         self._gain = 1.0
         self._dc_zi = np.zeros(1)
+        self._dc_primed = False
         self.offset_hz = 0.0
         self.set_offset(offset_hz)
         self.set_mode(mode, bw_hz)
@@ -108,9 +116,7 @@ class Demodulator:
     def set_mode(self, mode: Mode, bw_hz: float | None = None) -> None:
         if mode not in DEFAULT_BW:
             raise ValueError(f"unknown mode {mode!r}")
-        self.mode = mode
-        self.bw_hz = float(bw_hz or DEFAULT_BW[mode])
-        bw = self.bw_hz
+        bw = float(DEFAULT_BW[mode] if bw_hz is None else bw_hz)
         if mode == "AM":
             lo, hi = -bw / 2, bw / 2
         elif mode == "USB":
@@ -119,16 +125,26 @@ class Demodulator:
             lo, hi = -(bw + 100.0), -100.0
         else:  # CW, after the BFO shift
             lo, hi = CW_PITCH_HZ - bw / 2, CW_PITCH_HZ + bw / 2
+        if not bw >= 50.0 or max(abs(lo), abs(hi)) >= 0.45 * self.out_rate:
+            raise ValueError(f"bandwidth {bw_hz} Hz invalid for mode {mode} (need >= 50 Hz and "
+                             f"passband edge < {0.45 * self.out_rate:.0f} Hz)")
+        self.mode = mode
+        self.bw_hz = bw
         centre, half = (lo + hi) / 2, (hi - lo) / 2
         n = np.arange(_CHANNEL_TAPS)
         lp = firwin(_CHANNEL_TAPS, half, fs=self.out_rate)
         self._chan = (lp * np.exp(2j * np.pi * centre * n / self.out_rate)).astype(np.complex64)
         self._chan_zi = np.zeros(_CHANNEL_TAPS - 1, np.complex64)
+        self._dc_primed = False
 
     def process(self, iq: np.ndarray) -> np.ndarray:
         x = np.asarray(iq, np.complex64)
         step = -2 * np.pi * self.offset_hz / self.in_rate
-        x = x * np.exp(1j * (self._nco_phase + step * np.arange(x.size))).astype(np.complex64)
+        key = (x.size, step)
+        if self._rot_key != key:  # cache the per-block rotator; block sizes are usually constant
+            self._rot = np.exp(1j * step * np.arange(x.size)).astype(np.complex64)
+            self._rot_key = key
+        x = x * self._rot * np.complex64(np.exp(1j * self._nco_phase))
         self._nco_phase = float((self._nco_phase + step * x.size) % (2 * np.pi))
         for stage in self._stages:
             x = stage.process(x)
@@ -140,7 +156,11 @@ class Demodulator:
             self._bfo_phase = float((self._bfo_phase + bstep * x.size) % (2 * np.pi))
         y, self._chan_zi = lfilter(self._chan, 1.0, x, zi=self._chan_zi)
         if self.mode == "AM":
-            audio, self._dc_zi = lfilter([1.0, -1.0], [1.0, -0.995], np.abs(y), zi=self._dc_zi)
+            env = np.abs(y)
+            if not self._dc_primed:  # start the DC blocker at the carrier level: no first-block thump
+                self._dc_zi = lfilter_zi([1.0, -1.0], [1.0, -0.995]) * float(np.mean(env))
+                self._dc_primed = True
+            audio, self._dc_zi = lfilter([1.0, -1.0], [1.0, -0.995], env, zi=self._dc_zi)
         else:
             audio = y.real
         if self.agc_enabled:

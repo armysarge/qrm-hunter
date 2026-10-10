@@ -32,7 +32,7 @@ artifacts = ["backend/qrm_hunter/web/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["hardware: needs a real SDR attached"]
+markers = ["hardware: needs a real SDR attached", "performance: wall-clock timing bound (loose, CI-safe)"]
 addopts = "-m 'not hardware' --import-mode=importlib"
 
 [tool.ruff]

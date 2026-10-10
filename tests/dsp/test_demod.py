@@ -117,3 +117,37 @@ def test_offset_outside_span_rejected():
     d = Demodulator(RATE)
     with pytest.raises(ValueError):
         d.set_offset(RATE)
+
+
+def test_set_mode_rejects_bad_bandwidth_and_leaves_state_unchanged():
+    d = Demodulator(RATE, "USB", bw_hz=2400.0, agc=False)
+    chan = d._chan
+    for bad in (10.0, 49.0, 20_000.0, -5.0):
+        with pytest.raises(ValueError):
+            d.set_mode("AM", bad)
+    assert (d.mode, d.bw_hz) == ("USB", 2400.0)
+    assert d._chan is chan
+
+
+def test_am_first_block_has_no_dc_step():
+    d = Demodulator(RATE, "AM", offset_hz=0.0, agc=False)
+    x = am_signal(RATE, 0.0, 0.2, amp=0.5, depth=0.2)
+    a = d.process(x[:40_000]).astype(np.float64)
+    assert np.max(np.abs(a[200:])) < 0.25 * 32767  # carrier ~0.5 would step to ~16000 unprimed
+
+
+@pytest.mark.performance
+def test_demodulator_runs_faster_than_real_time_at_3p2_msps():
+    """Loose CI-safe bound (0.5 s per 1 s of input); typical is ~0.07 s."""
+    import time
+
+    rate = 3.2e6
+    d = Demodulator(rate, "USB", offset_hz=50_000.0)
+    rng = np.random.default_rng(1)
+    x = (rng.normal(size=int(rate)) + 1j * rng.normal(size=int(rate))).astype(np.complex64)
+    bl = np.array_split(x, int(rate / 32768))
+    d.process(bl[0])
+    t0 = time.perf_counter()
+    for b in bl:
+        d.process(b)
+    assert time.perf_counter() - t0 < 0.5
