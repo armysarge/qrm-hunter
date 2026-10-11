@@ -94,6 +94,7 @@ let loop: Promise<void> | null = null;
 /** Optimistically apply a patch, then send it. Rapid patches (drag-tuning) are coalesced into the
  *  running send loop; every caller's promise settles when that loop has finished. */
 export function setRadio(patch: StatePatch): Promise<void> {
+  if (!Object.keys(patch).length) return loop ?? Promise.resolve();
   if (app.radio) Object.assign(app.radio, patch);
   Object.assign(pending, patch);
   if (loop) return loop;

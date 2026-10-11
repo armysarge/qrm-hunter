@@ -18,7 +18,7 @@ from ..sdr.base import DeviceConfig, DeviceError, DeviceInfo, SdrDevice
 from ..sdr.discovery import create_device
 from .broadcast import Broadcaster
 from .prebuffer import DEFAULT_PREBUFFER_S, IqSnapshot, PreBuffer
-from .state import AudioChunk, RadioState, SpectrumFrame, StatePatch, Stats
+from .state import AudioChunk, DirectSampling, RadioState, SpectrumFrame, StatePatch, Stats
 
 log = logging.getLogger(__name__)
 
@@ -93,6 +93,10 @@ class RadioSession:
         self._rds: RdsDecoder | None = None  # runs only while the mode is WFM
         self._rds_snapshot: dict | None = None
         self._region = 1
+        # Settings that another change would otherwise overwrite: the last bandwidth used in each
+        # mode, and the HF input the user chose (the driver may switch it off above HF and back).
+        self._bw_by_mode: dict[str, float] = {}
+        self._hf_input: DirectSampling = self._state.direct_sampling
         self._block = 32768
         self._gen = 0
         self._seq = 0
@@ -167,8 +171,10 @@ class RadioSession:
             # before open), so a rejected request leaves the running radio untouched.
             try:
                 base = self.state.model_copy(update={"device_id": device_id, "running": False})
-                merged = self._merge(base, patch)
+                merged = self._merge(base, patch, self._bw_by_mode)
                 explicit = patch.model_dump(exclude_unset=True) if patch else {}
+                if "direct_sampling" not in explicit:
+                    merged = merged.model_copy(update={"direct_sampling": self._hf_input})
                 if "center_hz" not in explicit:
                     merged = merged.model_copy(update={"center_hz": merged.tune_hz + merged.sample_rate / 4})
                 merged = self._recentre(merged, device.info, center_explicit=False)
@@ -191,6 +197,7 @@ class RadioSession:
             with self._lock:
                 self._run = run
                 self._state = merged
+                self._remember(merged, explicit)
                 self._stats = Stats()
                 self._spectrum = spectrum
                 self._demod = demod
@@ -242,12 +249,15 @@ class RadioSession:
         explicit = patch.model_dump(exclude_unset=True)
         with self._lock:
             old = self._state
-            new = self._merge(old, patch)
+            new = self._merge(old, patch, self._bw_by_mode)
             run = self._run
             if run is not None and old.running:
                 device = run.device
                 new = self._recentre(new, device.info,
                                      center_explicit="center_hz" in explicit and "tune_hz" not in explicit)
+                if "direct_sampling" not in explicit and new.center_hz != old.center_hz:
+                    # Ask for the chosen HF input again; the device decides what the new centre allows.
+                    new = new.model_copy(update={"direct_sampling": self._hf_input})
                 plan = self._plan_dsp(old, new)  # validates everything before any side effect
                 if self._device_fields(new) != self._device_fields(old):
                     if not self._dev_lock.acquire(timeout=DEV_LOCK_TIMEOUT):
@@ -264,6 +274,7 @@ class RadioSession:
                         self._dev_lock.release()
                 self._apply_dsp(old, new, plan)
             self._state = new
+            self._remember(new, explicit)
             if self._rds_stale(old, new):
                 self._reset_rds()
         self._publish_state()
@@ -271,13 +282,20 @@ class RadioSession:
 
     # --- state helpers ----------------------------------------------------------------------
 
+    def _remember(self, s: RadioState, explicit: dict) -> None:
+        self._bw_by_mode[s.mode] = s.bw_hz
+        if "direct_sampling" in explicit:
+            self._hf_input = explicit["direct_sampling"]
+
     @staticmethod
-    def _merge(base: RadioState, patch: StatePatch | None) -> RadioState:
+    def _merge(base: RadioState, patch: StatePatch | None,
+               bw_by_mode: dict[str, float] | None = None) -> RadioState:
         data = base.model_dump()
         if patch is not None:
             upd = patch.model_dump(exclude_unset=True)
-            if "mode" in upd and "bw_hz" not in upd:
-                upd["bw_hz"] = DEFAULT_BW[upd["mode"]]
+            if "mode" in upd and "bw_hz" not in upd and upd["mode"] != base.mode:
+                # A mode change brings back the bandwidth last used in that mode.
+                upd["bw_hz"] = (bw_by_mode or {}).get(upd["mode"], DEFAULT_BW[upd["mode"]])
             data.update(upd)
         try:
             return RadioState.model_validate(data)

@@ -10,11 +10,14 @@
   const active = $derived(activeBand?.name);
 
   // The chip row shows one group at a time; it follows the tuned band unless the user picks another.
+  // Only tuning into a band of another group drops the pick: mode changes and tuning between
+  // bands (outside any band) leave it alone.
   let picked = $state<BandGroup | null>(null);
   let lastActive: BandGroup | undefined;
   $effect(() => {
     const g = activeBand?.group;
-    if (g && g !== lastActive) picked = null;
+    if (!g) return;
+    if (lastActive && g !== lastActive) picked = null;
     lastActive = g;
   });
   const group = $derived<BandGroup>(picked ?? activeBand?.group ?? "HF");
