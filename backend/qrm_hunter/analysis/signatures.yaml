@@ -1,0 +1,153 @@
+# Built-in QRM signatures. A file with the same schema at <config dir>/signatures.yaml overrides
+# or extends these by id. Each condition: feature, one of between/gt/lt/near: [value, tolerance],
+# weight, optional evidence template ({group.name:format} refers to a feature).
+signatures:
+  - id: smps
+    name: Switch-mode power supply / charger
+    hunt: home-electronics
+    description: A comb of harmonics from a switching converter, modulated by mains ripple, with lines that wobble.
+    requires: [comb.spacing_hz]
+    conditions:
+      - {feature: comb.count, gt: 4, weight: 2, evidence: "comb lines every {comb.spacing_hz:.0f} Hz ({comb.count:.0f} lines)"}
+      - {feature: comb.spacing_hz, between: [8000, 70000], weight: 1}
+      - {feature: mains.depth, between: [0.15, 0.6], weight: 2, evidence: "lines modulated {mains.depth:.0%} at the {mains.hz:.0f} Hz mains family"}
+      - {feature: comb.stability, lt: 0.6, weight: 2, evidence: "line frequencies wobble (stability {comb.stability:.2f})"}
+      - {feature: mains.harmonics, lt: 3, weight: 1}
+
+  - id: pv_inverter
+    name: Solar PV inverter
+    hunt: solar
+    description: A comb whose lines drift slowly as the inverter tracks the panels' maximum power point.
+    requires: [comb.spacing_hz]
+    conditions:
+      - {feature: comb.count, gt: 4, weight: 2}
+      - {feature: comb.drift_hz_s, gt: 25, weight: 3, evidence: "lines drift {comb.drift_hz_s:.0f} Hz per second"}
+      - {feature: mains.depth, lt: 0.15, weight: 1}
+      - {feature: comb.spacing_hz, between: [10000, 60000], weight: 1}
+
+  - id: led_dimmer
+    name: LED driver / dimmer
+    hunt: home-electronics
+    description: A converter comb chopped on and off at twice the mains frequency.
+    requires: [comb.spacing_hz]
+    conditions:
+      - {feature: mains.harmonics, gt: 3, weight: 3, evidence: "{mains.harmonics:.0f} mains harmonics in the envelope: the lines are chopped"}
+      - {feature: mains.depth, gt: 0.6, weight: 2, evidence: "{mains.depth:.0%} modulation at the {mains.hz:.0f} Hz mains family"}
+      - {feature: comb.count, gt: 4, weight: 1}
+
+  - id: vdsl
+    name: VDSL / xDSL
+    hunt: dsl
+    description: A wide flat OFDM block on the 4.3125 kHz VDSL carrier grid, often with notches.
+    requires: [ofdm.spacing_hz]
+    conditions:
+      - {feature: ofdm.spacing_hz, near: [4312.5, 86.25], weight: 3, evidence: "OFDM carriers every {ofdm.spacing_hz:.1f} Hz (VDSL grid)"}
+      - {feature: ofdm.flatness, gt: 0.5, weight: 2, evidence: "flat block {occupied_bw_hz:.0f} Hz wide"}
+      - {feature: time.duty, gt: 0.85, weight: 1}
+      - {feature: comb.count, lt: 3, weight: 1}
+
+  - id: plc
+    name: PLC / powerline adapter
+    hunt: powerline-adapter
+    description: Bursts of OFDM on the 24.414 kHz HomePlug carrier grid.
+    requires: [ofdm.spacing_hz]
+    conditions:
+      - {feature: ofdm.spacing_hz, near: [24414.0625, 488.3], weight: 3, evidence: "OFDM carriers every {ofdm.spacing_hz:.0f} Hz (HomePlug grid)"}
+      - {feature: ofdm.flatness, gt: 0.4, weight: 1}
+      - {feature: time.duty, lt: 0.8, weight: 2, evidence: "transmits in bursts, on {time.duty:.0%} of the time"}
+
+  - id: arcing
+    name: Power-line arcing / insulator
+    hunt: power-line
+    description: Broadband impulses locked to the peaks of the mains voltage.
+    requires: [imp.period_s]
+    conditions:
+      - {feature: imp.rate_hz, between: [80, 130], weight: 2, evidence: "{imp.rate_hz:.0f} impulses per second, locked to the mains"}
+      - {feature: imp.periodicity, gt: 0.7, weight: 2}
+      - {feature: mains.harmonics, gt: 4, weight: 1, evidence: "{mains.harmonics:.0f} mains harmonics in the envelope"}
+      - {feature: imp.crest_db, gt: 20, weight: 1}
+
+  - id: plasma_tv
+    name: Plasma TV
+    hunt: home-electronics
+    description: A dense comb of lines a few kHz apart with a strong mains buzz.
+    requires: [comb.spacing_hz]
+    conditions:
+      - {feature: comb.spacing_hz, between: [1000, 6000], weight: 1}
+      - {feature: comb.count, gt: 20, weight: 2, evidence: "dense comb: {comb.count:.0f} lines {comb.spacing_hz:.0f} Hz apart"}
+      - {feature: mains.depth, gt: 0.5, weight: 2, evidence: "{mains.depth:.0%} mains buzz on the lines"}
+      - {feature: occupied_bw_hz, gt: 60000, weight: 1}
+
+  - id: pc_clock
+    name: PC / monitor / clock harmonics
+    hunt: home-electronics
+    description: A few isolated, very steady carriers that are not on a common grid.
+    requires: [lines.width_hz]
+    conditions:
+      - {feature: lines.count, between: [2, 8], weight: 2, evidence: "{lines.count:.0f} isolated steady carriers"}
+      - {feature: comb.count, lt: 3, weight: 2}
+      - {feature: lines.width_hz, lt: 120, weight: 2, evidence: "each carrier only {lines.width_hz:.0f} Hz wide"}
+      - {feature: mains.depth, lt: 0.1, weight: 1}
+      - {feature: imp.rate_hz, lt: 1, weight: 1}
+
+  - id: ethernet
+    name: Ethernet / USB-C
+    hunt: home-electronics
+    description: A few carriers smeared by spread-spectrum clocking.
+    requires: [lines.width_hz]
+    conditions:
+      - {feature: lines.count, between: [1, 6], weight: 1}
+      - {feature: lines.width_hz, between: [180, 3000], weight: 3, evidence: "carriers smeared {lines.width_hz:.0f} Hz wide (spread-spectrum clock)"}
+      - {feature: comb.count, lt: 3, weight: 2}
+
+  - id: ev_charger
+    name: EV / e-bike charger
+    hunt: ev-charger
+    description: A steady converter comb with strong modulation at twice the mains frequency.
+    requires: [comb.spacing_hz]
+    conditions:
+      - {feature: comb.count, gt: 4, weight: 1}
+      - {feature: comb.spacing_hz, between: [13500, 60000], weight: 2}
+      - {feature: mains.depth, gt: 0.7, weight: 3, evidence: "strong {mains.hz:.0f} Hz-family modulation ({mains.depth:.0%})"}
+      - {feature: mains.harmonics, lt: 3, weight: 2}
+      - {feature: comb.stability, gt: 0.6, weight: 1}
+
+  - id: electric_fence
+    name: Electric fence
+    hunt: fence
+    description: Loud broadband clicks at a steady interval of about a second.
+    requires: [imp.period_s]
+    conditions:
+      - {feature: imp.period_s, between: [0.6, 2.5], weight: 3, evidence: "a click every {imp.period_s:.2f} s"}
+      - {feature: imp.periodicity, gt: 0.7, weight: 2}
+      - {feature: imp.rate_hz, lt: 2, weight: 1}
+
+  - id: motor_brush
+    name: Motor / brush noise
+    hunt: motor
+    description: Wideband impulses at the motor's commutation rate.
+    requires: [imp.period_s]
+    conditions:
+      - {feature: imp.rate_hz, between: [200, 1000], weight: 3, evidence: "{imp.rate_hz:.0f} impulses per second (commutation)"}
+      - {feature: imp.periodicity, gt: 0.4, weight: 1}
+      - {feature: imp.crest_db, gt: 15, weight: 1}
+
+  - id: vsd
+    name: Variable-speed drive
+    hunt: vsd
+    description: A PWM carrier comb whose lines carry motor-frequency sidebands.
+    requires: [comb.spacing_hz]
+    conditions:
+      - {feature: comb.spacing_hz, between: [1500, 17000], weight: 2, evidence: "PWM carrier comb every {comb.spacing_hz:.0f} Hz"}
+      - {feature: comb.width_hz, gt: 150, weight: 2, evidence: "sidebands widen each line to {comb.width_hz:.0f} Hz"}
+      - {feature: mains.depth, lt: 0.15, weight: 2}
+      - {feature: comb.stability, gt: 0.6, weight: 1}
+
+  - id: relay
+    name: Thermostat / relay clicks
+    hunt: relay
+    description: Occasional loud clicks at irregular intervals.
+    conditions:
+      - {feature: imp.rate_hz, between: [0.15, 2.5], weight: 3, evidence: "{imp.rate_hz:.1f} clicks per second at irregular intervals"}
+      - {feature: imp.crest_db, gt: 20, weight: 2}
+      - {feature: imp.periodicity, lt: 0.5, weight: 1}

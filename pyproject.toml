@@ -15,6 +15,7 @@ dependencies = [
   "pywebview>=5.0",
   "pyrtlsdr>=0.3.0",
   "pyrtlsdrlib>=0.0.2",
+  "pyyaml>=6.0",
 ]
 
 [project.scripts]
