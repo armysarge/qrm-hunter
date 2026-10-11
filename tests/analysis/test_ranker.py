@@ -79,3 +79,25 @@ def test_a_corrupt_model_file_is_reported(tmp_path):
 def test_no_model_files(tmp_path):
     ranker, status = Ranker.load(tmp_path)
     assert ranker is None and status.startswith("no ranker model")
+
+
+def test_a_class_list_that_does_not_match_the_model_width_is_skipped(tmp_path):
+    shutil.copy(MODELS_DIR / "ranker.onnx", tmp_path / "ranker.onnx")
+    meta = json.loads((MODELS_DIR / "ranker.json").read_text(encoding="utf-8"))
+    meta["classes"] = meta["classes"][:-1]
+    (tmp_path / "ranker.json").write_text(json.dumps(meta), encoding="utf-8")
+    ranker, status = Ranker.load(tmp_path)
+    assert ranker is None and "could not be loaded" in status
+
+
+def test_a_broken_onnxruntime_install_means_rules_only(monkeypatch):
+    real = builtins.__import__
+
+    def fake(name, *a, **kw):
+        if name == "onnxruntime":
+            raise OSError("DLL load failed")
+        return real(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", fake)
+    ranker, status = Ranker.load()
+    assert ranker is None and status == "onnxruntime is not installed"

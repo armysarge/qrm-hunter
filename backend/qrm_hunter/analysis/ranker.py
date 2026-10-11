@@ -38,12 +38,16 @@ class Ranker:
             return None, "ranker model was trained on a different feature set"
         try:
             import onnxruntime as ort
-        except ImportError:
+        except Exception:  # not installed, or installed but its native library fails to load
             return None, "onnxruntime is not installed"
         try:
             session = ort.InferenceSession(str(models_dir / "ranker.onnx"), providers=["CPUExecutionProvider"])
             if PROBABILITIES not in [o.name for o in session.get_outputs()]:
                 raise ValueError("no probabilities output")
+            probe = session.run([PROBABILITIES], {session.get_inputs()[0].name: np.zeros((1, len(FEATURE_IDS)), np.float32)})
+            width = np.asarray(probe[0]).shape[-1]
+            if width != len(classes):
+                raise ValueError(f"model outputs {width} classes but {len(classes)} are listed")
         except Exception as exc:  # missing or corrupt file, unsupported opset, ...
             return None, f"ranker model could not be loaded ({exc})"
         return cls(session, classes, version), "ok"
