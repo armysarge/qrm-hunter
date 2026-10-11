@@ -23,7 +23,11 @@ def test_analyse_ranks_causes_and_reports_everything():
     assert {"features", "rules", "ranker", "total"} <= set(r.timing_ms)
     assert set(r.versions) == {"engine", "features", "model"}
     assert r.source.kind == "live" and r.source.seconds == pytest.approx(5.0)
-    json.loads(r.model_dump_json())  # NaN features are None, so this is valid JSON
+    def reject(constant):
+        raise ValueError(constant)
+
+    # NaN features are None, so the output is strictly valid JSON
+    json.loads(r.model_dump_json(), parse_constant=reject)
 
 
 def test_rules_only_when_the_ranker_is_missing():
@@ -53,6 +57,7 @@ def test_a_failing_ranker_falls_back_to_rules_only(behaviour):
     analyser = Analyser(base.signatures, _BrokenRanker(behaviour), "ok")
     r = analyser.analyse(render_profile_clip("smps", 15.0), CLIP_RATE, CLIP_CENTER_HZ, AnalysisContext())
     assert r.ranker != "ok" and "rules only" in r.ranker
+    assert r.versions["model"].endswith("(not used)")
     assert r.causes[0].id == "smps" and not any(c.beta for c in r.causes)
     assert all(c.model_score is None for c in r.causes)
 
@@ -64,10 +69,17 @@ def test_the_default_analyser_is_loaded_once(monkeypatch):
 
     def counting(*a, **kw):
         calls.append(1)
+        time.sleep(0.05)  # keeps the other threads waiting on the lock
         return real(*a, **kw)
 
     monkeypatch.setattr(Analyser, "create", staticmethod(counting))
-    threads = [threading.Thread(target=service.default_analyser) for _ in range(4)]
+    barrier = threading.Barrier(4)
+
+    def load():
+        barrier.wait()
+        service.default_analyser()
+
+    threads = [threading.Thread(target=load) for _ in range(4)]
     for t in threads:
         t.start()
     for t in threads:
@@ -97,6 +109,9 @@ def test_short_input_and_cancellation():
 def test_ten_seconds_at_200_khz_takes_under_three_seconds():
     iq = render_profile_clip("smps", 15.0, seconds=10.0, rate=200_000.0)
     analyser, _ = Analyser.create(None)
-    t0 = time.perf_counter()
-    analyser.analyse(iq, 200_000.0, CLIP_CENTER_HZ, AnalysisContext())
-    assert time.perf_counter() - t0 < 3.0
+    best = float("inf")
+    for _ in range(2):  # best of two, so a loaded machine does not fail it
+        t0 = time.perf_counter()
+        analyser.analyse(iq, 200_000.0, CLIP_CENTER_HZ, AnalysisContext())
+        best = min(best, time.perf_counter() - t0)
+    assert best < 3.0

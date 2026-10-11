@@ -117,11 +117,12 @@ class Analyser:
                                 lo_hz=center_hz - rate / 2 if lo_hz is None else lo_hz,
                                 hi_hz=center_hz + rate / 2 if hi_hz is None else hi_hz,
                                 seconds=len(iq) / rate, recording_id=recording_id)
+        model_version = "none" if self.ranker is None else self.ranker.version + ("" if model else " (not used)")
         return AnalysisResult(
             id=uuid.uuid4().hex, created=datetime.now(UTC).isoformat(timespec="seconds"), source=source,
             causes=causes, features=features.as_dict(), timing_ms=timing,
             versions={"engine": __version__, "features": str(FEATURE_VERSION),
-                      "model": self.ranker.version if self.ranker else "none"},
+                      "model": model_version},
             ranker=ranker_status,
         )
 
