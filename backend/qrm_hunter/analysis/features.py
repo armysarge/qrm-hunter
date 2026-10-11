@@ -10,7 +10,7 @@ from typing import Literal
 
 import numpy as np
 from scipy.signal import find_peaks
-from scipy.stats import kurtosis
+from scipy.stats import gamma, kurtosis
 
 from ..dsp.extract import extract_span
 from .spectra import Psd, StftStats, floor_curve_db, stft_pass, welch_psd
@@ -344,7 +344,9 @@ def mains_features(env: np.ndarray, env_rate: float, ctx: AnalysisContext) -> Ma
     if dc <= 0 or env.size < 16:
         return MainsResult(NAN, NAN, NAN)
     win = np.hanning(env.size)
-    nfft = max(env.size, int(np.ceil(env_rate / ENV_RES_HZ)))  # zero-pad to <= 0.25 Hz bins
+    # zero-padded to <= 0.25 Hz bin spacing, for peak picking; the true resolution is still
+    # 1 / duration (0.25 Hz needs a 4 s capture)
+    nfft = max(env.size, int(np.ceil(env_rate / ENV_RES_HZ)))
     spec = np.abs(np.fft.rfft((env - dc) * win, nfft))
     freqs = np.fft.rfftfreq(nfft, 1 / env_rate)
     scale = 2.0 / (dc * float(win.sum()))  # spectrum value -> modulation index
@@ -371,6 +373,7 @@ def mains_features(env: np.ndarray, env_rate: float, ctx: AnalysisContext) -> Ma
 # --- impulses ----------------------------------------------------------------------------------
 
 IMP_BLOCK_S = 100e-6  # power is averaged over 100 us blocks before thresholding
+IMP_FALSE_ALARM = 1e-7  # chance that a block of pure noise crosses the threshold
 IMP_SIGMA = 6.0
 IMP_MERGE_S = 1e-3
 
@@ -395,7 +398,11 @@ def impulse_features(iq: np.ndarray, rate: float) -> ImpulseResult:
     p = np.square(a[:n].astype(np.float64)).reshape(-1, block).mean(axis=1)
     med = float(np.median(p))
     sigma = max(1.4826 * float(np.median(np.abs(p - med))), 0.05 * med)  # robust (MAD) sigma
-    above = np.flatnonzero(p > med + IMP_SIGMA * sigma)
+    # at narrow rates a block holds one or two samples, whose noise power is exponential (gamma
+    # with `block` degrees of freedom) and far heavier-tailed than a MAD sigma assumes; the
+    # threshold is never below that distribution's IMP_FALSE_ALARM point
+    noise_floor = med / gamma.median(block) * gamma.isf(IMP_FALSE_ALARM, block)
+    above = np.flatnonzero(p > max(med + IMP_SIGMA * sigma, noise_floor))
     merge = max(1, int(round(IMP_MERGE_S * rate / block)))
     starts = above[np.insert(np.diff(above) > merge, 0, True)] if above.size else above
     times = starts * block / rate
@@ -418,6 +425,9 @@ OFDM_MIN_CORR = 0.04  # carrier-grid correlation at the grid's period (0-1)
 OFDM_CONTRAST = 1.5  # ... and this many times the correlation well away from it
 OFDM_SIDE = 0.15  # "well away": periods off by at least 15 %
 OFDM_EDGE_HZ = 1_000.0
+OFDM_MIN_FLATNESS = 0.3  # OFDM blocks measure 0.6-0.9; a comb on a noise block about 0.01-0.03
+OFDM_LINE_DB = 6.0  # bins this far above the floor curve are narrow lines ...
+OFDM_LINE_GUARD_HZ = 300.0  # ... and they are removed with this much margin either side
 _OFDM_STEPS = np.linspace(1 - 2 * OFDM_SIDE, 1 + 2 * OFDM_SIDE, 121)  # trial periods, x 1/grid
 
 
@@ -464,8 +474,14 @@ def ofdm_features(psd: Psd, level: LevelResult) -> OfdmResult:
     rise = c[min(a + w, c.size - 1)] - c[max(a - w, 0)]
     fall = c[max(b - 1 - w, 0)] - c[min(b - 1 + w, c.size - 1)]
     edges = float((rise + fall) / 2)
-    # narrow lines (a comb riding on a noise block) are clipped to just above the floor curve
-    clipped = np.minimum(region, 10 ** ((c[a:b] + 3.0) / 10))
+    if flatness < OFDM_MIN_FLATNESS:
+        return OfdmResult(NAN, flatness, edges)  # line-dominated: a comb, not a carrier grid
+    # narrow lines (a comb riding on a noise block) and their skirts are replaced by the floor
+    # curve, so their spacing cannot leave a ripple that correlates like a carrier grid
+    floor = 10 ** (c[a:b] / 10)
+    guard = max(1, int(round(OFDM_LINE_GUARD_HZ / psd.bin_hz)))
+    line = np.convolve(psd.db[a:b] > c[a:b] + OFDM_LINE_DB, np.ones(2 * guard + 1), "same") > 0
+    clipped = np.where(line, floor, region)
     near = np.flatnonzero(np.abs(_OFDM_STEPS - 1) <= OFDM_TOL + 1e-9)
     away = np.abs(_OFDM_STEPS - 1) >= OFDM_SIDE
     best, best_corr = NAN, OFDM_MIN_CORR
@@ -502,6 +518,9 @@ def time_features(stats: StftStats, level: LevelResult, mask_bins: int) -> TimeR
     if n < 2 or mask_bins == 0:
         return TimeResult(NAN, NAN, NAN)
     e = stats.energy[:n * per].reshape(n, per).mean(axis=1)
+    # the mask selects the bins that carry the signal (curve 3 dB over the quietest floor, or a
+    # line 10 dB over it); a frame then counts as persistent when the energy in those bins is
+    # ON_DB above the noise they would hold alone. The two thresholds answer different questions.
     noise = 10 ** (level.ref_db / 10) * mask_bins
     persistence = float(np.mean(e >= noise * 10 ** (ON_DB / 10)))
     if not level.occupied.any():

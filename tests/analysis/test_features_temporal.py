@@ -1,3 +1,4 @@
+import dataclasses
 import math
 
 import numpy as np
@@ -20,7 +21,7 @@ from qrm_hunter.analysis.features import (
 from qrm_hunter.analysis.spectra import welch_psd
 from qrm_hunter.sdr.synthetic import CLIP_CENTER_HZ as C
 from qrm_hunter.sdr.synthetic import CLIP_RATE as RATE
-from qrm_hunter.sdr.synthetic import Source, render_clip, render_profile_clip
+from qrm_hunter.sdr.synthetic import Source, profile_sources, render_clip, render_profile_clip
 
 
 def carrier(mod_hz, depth, seconds=4.0, shape="sine", duty=0.5, offset=20_000.0, seed=0):
@@ -163,3 +164,37 @@ def test_a_narrow_rate_clip_is_analysed_with_unmeasurable_features_as_nan():
 def test_a_clip_at_the_minimum_length_is_analysed():
     f = extract_features(render_profile_clip(None, seconds=2.0), RATE, C)
     assert not math.isnan(f.floor_db) and math.isnan(f.comb_spacing_hz) and math.isnan(f.time_duty)
+
+
+@pytest.mark.parametrize("spacing", [4312.5, 4250.0, 8625.0])
+@pytest.mark.parametrize("seed", [0, 1])
+def test_a_comb_on_a_noise_block_is_not_ofdm(spacing, seed):
+    src = profile_sources("plasma_tv", rng=np.random.default_rng(seed))
+    src[0] = dataclasses.replace(src[0], params={**src[0].params, "spacing_hz": spacing})
+    psd = welch_psd(render_clip(src, seconds=4.0, seed=seed + 1), RATE, C)
+    assert math.isnan(ofdm_features(psd, level_features(psd)).spacing_hz)
+
+
+@pytest.mark.parametrize("rate", [12_500.0, 25_000.0, 50_000.0])
+def test_noise_has_no_impulses_at_narrow_rates(rate):
+    assert impulse_features(render_profile_clip(None, seconds=4.0, rate=rate), rate).rate_hz < 0.5
+
+
+@pytest.mark.parametrize("rate", [12_500.0, 25_000.0])
+def test_impulses_are_found_at_narrow_rates(rate):
+    imp = impulse_features(render_profile_clip("arcing", 15.0, seconds=4.0, rate=rate), rate)
+    assert imp.rate_hz == pytest.approx(86.0, rel=0.15) and imp.periodicity >= 0.9
+
+
+@pytest.mark.parametrize("stop_at", [2, 3, 4])
+def test_cancellation_between_later_stages(stop_at):
+    calls = []
+
+    def check():
+        calls.append(1)
+        if len(calls) == stop_at:
+            raise Cancelled("stop")
+
+    with pytest.raises(Cancelled):
+        extract_features(render_profile_clip(None, seconds=2.5), RATE, C, check=check)
+    assert len(calls) == stop_at
