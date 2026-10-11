@@ -10,13 +10,13 @@ from .base import DeviceError, DeviceInfo, SdrDevice
 from .replay import ReplayDevice
 from .rtlsdr_dev import RtlSdrDevice, list_rtlsdr
 from .soapy_dev import SoapyDevice, args_from_device_id, enumerate_soapy
-from .synthetic import SYNTHETIC_INFO, SyntheticDevice
+from .synthetic import SYNTHETIC_INFO, SyntheticDevice, profile_infos
 
 log = logging.getLogger(__name__)
 
 Backend = tuple[str, Callable[[], list[DeviceInfo]]]
 BACKENDS: list[Backend] = [
-    ("synthetic", lambda: [SYNTHETIC_INFO]),
+    ("synthetic", lambda: [SYNTHETIC_INFO, *profile_infos()]),
     ("rtlsdr", list_rtlsdr),
     ("soapy", enumerate_soapy),
 ]
@@ -35,6 +35,8 @@ def discover(backends: Iterable[Backend] | None = None) -> list[DeviceInfo]:
 def create_device(device_id: str, *, realtime: bool = True) -> SdrDevice:
     if device_id == "synthetic":
         return SyntheticDevice(realtime=realtime)
+    if device_id.startswith("synthetic:"):
+        return SyntheticDevice(realtime=realtime, profile=device_id.removeprefix("synthetic:"))
     if device_id.startswith("rtlsdr:"):
         try:
             index = int(device_id.removeprefix("rtlsdr:"))
