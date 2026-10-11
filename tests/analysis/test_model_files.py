@@ -25,10 +25,9 @@ def test_model_is_small_and_runs():
     assert path.stat().st_size < 1_000_000
     sess = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
     assert sess.get_inputs()[0].name == "features"
-    names = [o.name for o in sess.get_outputs()]
     x = np.full((2, len(FEATURE_IDS)), np.nan, np.float32)
     x[1] = 0.0
-    probs = sess.run(None, {"features": x})[names.index("probabilities")]
+    probs = sess.run(["probabilities"], {"features": x})[0]
     assert probs.shape == (2, len(CLASS_IDS))
     assert np.allclose(probs.sum(axis=1), 1.0, atol=1e-3)
 
