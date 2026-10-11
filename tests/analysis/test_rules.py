@@ -117,3 +117,49 @@ def test_malformed_user_file_is_reported_and_ignored(tmp_path, text):
     assert [s.id for s in sigs] == list(CLASS_IDS[:-1])
     with pytest.raises(SignatureError):
         parse_signatures(text, "x")
+
+
+def test_an_unmeasured_optional_feature_scores_zero_but_keeps_its_weight():
+    sig = SIG.model_copy(update={"conditions": [cond(gt=1000, weight=3), cond(feature="mains.depth", lt=0.5, weight=1)]})
+    assert membership(math.nan, cond(feature="mains.depth", lt=0.5)) == 0.0
+    assert score_signature(sig, Features(comb_spacing_hz=2000.0)).score == pytest.approx(0.75)
+
+
+def test_evidence_naming_an_unmeasured_feature_is_left_out():
+    sig = SIG.model_copy(update={"conditions": [cond(gt=1, evidence="{comb.spacing_hz:.0f} Hz, {mains.depth:.0%} deep")]})
+    assert score_signature(sig, Features(comb_spacing_hz=5.0)).evidence == []
+    assert score_signature(sig, Features(comb_spacing_hz=5.0, mains_depth=0.5)).evidence == ["5 Hz, 50% deep"]
+
+
+@pytest.mark.parametrize("template", ["{comb[0]}", "{comb.spacing_hz:q}", "{", "{0}"])
+def test_any_unformattable_evidence_falls_back_to_its_text(template):
+    sig = SIG.model_copy(update={"conditions": [cond(gt=1, evidence=template)]})
+    assert score_signature(sig, Features(comb_spacing_hz=5.0)).evidence == [template]
+
+
+def test_evidence_may_not_reach_dunder_attributes():
+    with pytest.raises(ValueError):
+        cond(gt=1, evidence="{comb.__class__}")
+
+
+def test_non_finite_bounds_are_rejected():
+    with pytest.raises(ValueError):
+        cond(gt=math.inf)
+    with pytest.raises(ValueError):
+        cond(between=(math.nan, 1.0))
+
+
+def test_an_oversized_user_file_is_ignored_unread(tmp_path):
+    path = tmp_path / "signatures.yaml"
+    path.write_text("#" * 1_000_001, encoding="utf-8")
+    sigs, warning = load_signatures(path)
+    assert warning and str(path) in warning and "MB" in warning
+    assert [s.id for s in sigs] == list(CLASS_IDS[:-1])
+
+
+def test_a_deeply_nested_user_file_is_ignored(tmp_path):
+    path = tmp_path / "signatures.yaml"
+    path.write_text("signatures: " + "[" * 100_000 + "]" * 100_000, encoding="utf-8")
+    sigs, warning = load_signatures(path)
+    assert warning and str(path) in warning
+    assert [s.id for s in sigs] == list(CLASS_IDS[:-1])

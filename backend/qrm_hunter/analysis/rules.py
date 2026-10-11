@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import string
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,6 +25,7 @@ UNKNOWN_INFO = {
     "description": "No known signature matches well. Save a recording so it can be compared later.",
 }
 BUILTIN_PATH = Path(__file__).with_name("signatures.yaml")
+MAX_USER_FILE_BYTES = 1_000_000  # a hand-written signatures file is a few kB
 
 
 class SignatureError(ValueError):
@@ -52,6 +54,9 @@ class Condition(BaseModel):
             raise ValueError(f"between bounds for {self.feature} must be [low, high]")
         if self.near is not None and self.near[1] <= 0:
             raise ValueError(f"near tolerance for {self.feature} must be positive")
+        if self.evidence is not None and "__" in self.evidence:
+            # str.format can walk attributes; dunder names would reach Python internals
+            raise ValueError(f"evidence for {self.feature} must not contain '__'")
         return self
 
 
@@ -95,12 +100,16 @@ def parse_signatures(text: str, source: str) -> list[Signature]:
         doc = yaml.safe_load(text)
     except yaml.YAMLError as exc:
         raise SignatureError(f"{source}: not valid YAML ({exc})") from exc
+    except (RecursionError, MemoryError) as exc:
+        raise SignatureError(f"{source}: nested too deeply or too large to read") from exc
     try:
         return _SignatureFile.model_validate(doc).signatures
     except ValidationError as exc:
         first = exc.errors()[0]
         where = ".".join(str(p) for p in first["loc"])
         raise SignatureError(f"{source}: {where}: {first['msg']}") from exc
+    except (RecursionError, MemoryError) as exc:
+        raise SignatureError(f"{source}: nested too deeply or too large to check") from exc
 
 
 def user_signatures_path(settings_path: Path) -> Path:
@@ -114,9 +123,13 @@ def load_signatures(user_path: Path | None) -> tuple[list[Signature], str | None
     if user_path is None or not Path(user_path).exists():
         return builtin, None
     try:
+        size = Path(user_path).stat().st_size
+        if size > MAX_USER_FILE_BYTES:
+            raise SignatureError(f"{size} bytes, larger than the "
+                                 f"{MAX_USER_FILE_BYTES // 1_000_000} MB limit")
         user = parse_signatures(Path(user_path).read_text(encoding="utf-8"), str(user_path))
-    except (SignatureError, OSError, UnicodeDecodeError) as exc:
-        return builtin, f"Ignoring {user_path}: {exc}"
+    except (SignatureError, OSError, UnicodeDecodeError, RecursionError, MemoryError) as exc:
+        return builtin, f"Ignoring {user_path}: {exc or type(exc).__name__}"
     merged = {s.id: s for s in builtin}
     for s in user:
         merged[s.id] = s
@@ -140,6 +153,9 @@ def _down(v: float, edge: float, width: float) -> float:
 
 
 def membership(value: float | None, c: Condition) -> float:
+    """1 inside the condition's bounds, falling linearly to 0 beyond them. gt/lt ramp over
+    RAMP x |bound| (gt 10 is 0 at 9); between/near ramp over RAMP x the span (between 100-200
+    is 0 at 90 and 210). A missing or non-finite value is 0."""
     if value is None or not math.isfinite(value):
         return 0.0
     if c.gt is not None:
@@ -162,17 +178,30 @@ def score_signature(sig: Signature, features: Features) -> RuleResult:
     if any(not math.isfinite(features.get(f)) for f in sig.requires):
         return RuleResult(sig.id, 0.0, [])
     args = features.format_args()
+    # an unmeasurable feature outside `requires` scores 0 for its condition (even lt) but its
+    # weight stays in the total, so missing evidence lowers the score
     total = sum(c.weight for c in sig.conditions)
     score, evidence = 0.0, []
     for c in sig.conditions:
         m = membership(features.get(c.feature), c)
         score += c.weight * m
         if c.evidence and m >= 0.5:
-            try:
-                evidence.append(c.evidence.format(**args))
-            except (KeyError, AttributeError, ValueError, IndexError, TypeError):
-                evidence.append(c.evidence)
+            line = _evidence(c.evidence, features, args)
+            if line is not None:
+                evidence.append(line)
     return RuleResult(sig.id, score / total, evidence)
+
+
+def _evidence(template: str, features: Features, args: dict) -> str | None:
+    """The filled-in template; None when a feature it names cannot be measured (rather than
+    showing "nan"); the template text itself when it cannot be filled in."""
+    try:
+        names = [f for _, f, _, _ in string.Formatter().parse(template) if f is not None]
+        if any(f in FEATURE_IDS and not math.isfinite(features.get(f)) for f in names):
+            return None
+        return template.format(**args)
+    except Exception:  # a user template may be malformed in any way str.format can object to
+        return template
 
 
 def apply_rules(signatures: list[Signature], features: Features) -> dict[str, RuleResult]:

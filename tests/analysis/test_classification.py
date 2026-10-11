@@ -10,6 +10,7 @@ from qrm_hunter.analysis.rules import UNKNOWN_ID, apply_rules, load_signatures, 
 from qrm_hunter.sdr.synthetic import CLIP_CENTER_HZ, CLIP_RATE, PROFILE_IDS, render_profile_clip
 
 STRENGTHS = (6.0, 15.0, 25.0)
+MIN_MARGIN = 0.1  # own class over the runner-up; the closest measured gap is about 0.17
 SIGNATURES, _ = load_signatures(None)
 
 
@@ -23,7 +24,9 @@ def features(name, strength, center=CLIP_CENTER_HZ):
 @pytest.mark.parametrize("name", PROFILE_IDS)
 def test_rules_rank_the_profiles_own_class_first(name, strength):
     order = ranked(apply_rules(SIGNATURES, features(name, strength)))
-    assert order[0].id == name, [(r.id, round(r.score, 2)) for r in order[:3]]
+    top3 = [(r.id, round(r.score, 2)) for r in order[:3]]
+    assert order[0].id == name, top3
+    assert order[0].score - order[1].score >= MIN_MARGIN, top3
 
 
 def test_pure_noise_is_unknown():

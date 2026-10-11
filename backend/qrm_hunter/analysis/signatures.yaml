@@ -1,6 +1,11 @@
 # Built-in QRM signatures. A file with the same schema at <config dir>/signatures.yaml overrides
 # or extends these by id. Each condition: feature, one of between/gt/lt/near: [value, tolerance],
 # weight, optional evidence template ({group.name:format} refers to a feature).
+# Membership is 1 inside the bounds and falls linearly to 0 beyond them: gt/lt ramp over 10 % of
+# the bound's value (gt: 20 is 0 at 18), between/near over 10 % of the span (between: [100, 200]
+# is 0 at 90 and 210). A feature that cannot be measured scores 0 but its weight still counts;
+# list it under requires to score the whole signature 0 instead. Evidence is shown for conditions
+# at 0.5 or more and left out when a value it refers to cannot be measured.
 signatures:
   - id: smps
     name: Switch-mode power supply / charger
@@ -42,7 +47,7 @@ signatures:
     requires: [ofdm.spacing_hz]
     conditions:
       - {feature: ofdm.spacing_hz, near: [4312.5, 86.25], weight: 3, evidence: "OFDM carriers every {ofdm.spacing_hz:.1f} Hz (VDSL grid)"}
-      - {feature: ofdm.flatness, gt: 0.5, weight: 2, evidence: "flat block {occupied_bw_hz:.0f} Hz wide"}
+      - {feature: ofdm.flatness, gt: 0.35, weight: 2, evidence: "flat block {occupied_bw_hz:.0f} Hz wide"}
       - {feature: time.duty, gt: 0.85, weight: 1}
       - {feature: comb.count, lt: 3, weight: 1}
 
@@ -139,9 +144,10 @@ signatures:
     requires: [comb.spacing_hz]
     conditions:
       - {feature: comb.spacing_hz, between: [1500, 17000], weight: 2, evidence: "PWM carrier comb every {comb.spacing_hz:.0f} Hz"}
-      - {feature: comb.width_hz, gt: 150, weight: 2, evidence: "sidebands widen each line to {comb.width_hz:.0f} Hz"}
+      - {feature: lines.count, gt: 20, weight: 2, evidence: "{lines.count:.0f} spectral lines: PWM carriers plus motor sidebands"}
       - {feature: mains.depth, lt: 0.15, weight: 2}
       - {feature: comb.stability, gt: 0.6, weight: 1}
+      - {feature: comb.drift_hz_s, lt: 25, weight: 1}
 
   - id: relay
     name: Thermostat / relay clicks
