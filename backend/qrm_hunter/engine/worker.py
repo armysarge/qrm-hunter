@@ -53,6 +53,7 @@ class JobRunner:
 
     def shutdown(self) -> None:
         cancel, future = self._cancel, self._future
+        self._future = None  # a second shutdown must not release the lock again
         if cancel is not None:
             cancel.set()  # a running job stops at its next check
         if future is not None and future.cancel():  # queued, never started: its own release will not run
