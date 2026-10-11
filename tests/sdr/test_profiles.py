@@ -1,7 +1,9 @@
+import time
+
 import numpy as np
 import pytest
 
-from qrm_hunter.sdr.base import DeviceError
+from qrm_hunter.sdr.base import DeviceConfig, DeviceError
 from qrm_hunter.sdr.discovery import create_device, discover
 from qrm_hunter.sdr.synthetic import (
     CLIP_CENTER_HZ,
@@ -144,3 +146,24 @@ def test_profile_devices_are_listed_and_created():
     assert "VDSL" in d.info.label
     with pytest.raises(DeviceError):
         create_device("synthetic:toaster")
+
+
+def test_profile_and_sources_are_mutually_exclusive():
+    with pytest.raises(ValueError):
+        SyntheticDevice(sources=[], profile="smps")
+
+
+@pytest.mark.performance
+@pytest.mark.parametrize("name", PROFILE_IDS)
+def test_profile_generates_faster_than_real_time_at_full_rate(name):
+    rate, n = 2_400_000.0, 32_768
+    d = SyntheticDevice(profile=name, realtime=False)
+    d.open()
+    d.configure(DeviceConfig(center_hz=CLIP_CENTER_HZ, sample_rate=rate))
+    times = []
+    for _ in range(10):
+        t0 = time.perf_counter()
+        d.read(n)
+        times.append(time.perf_counter() - t0)
+    assert times[0] < 0.2  # nothing is built lazily on the first read
+    assert sorted(times)[len(times) // 2] < 0.4 * n / rate

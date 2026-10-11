@@ -6,6 +6,7 @@ import cmath
 import math
 import time
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from typing import Literal
 
 import numpy as np
@@ -53,12 +54,15 @@ SYNTHETIC_INFO = DeviceInfo(
 
 _GOLDEN_ANGLE = 2.399963
 _PHASOR_CACHE_MAX = 32
+_SLOW_STEP = 64  # grid spacing (samples) for slow modulation that is interpolated
 
 
 class SyntheticDevice:
     def __init__(self, sources: list[Source] | None = None, noise_db: float = -45.0,
                  seed: int = 1234, realtime: bool = True, profile: str | None = None) -> None:
         if profile is not None:
+            if sources is not None:
+                raise ValueError("pass either sources or a profile, not both")
             if profile not in PROFILE_IDS:
                 raise DeviceError(f"unknown synthetic profile {profile!r}")
             sources = profile_sources(profile)
@@ -84,6 +88,7 @@ class SyntheticDevice:
 
     def open(self) -> None:
         self._open = True
+        self._walk.clear()
         self._t0 = time.monotonic()
         self._paced = 0
 
@@ -94,6 +99,9 @@ class SyntheticDevice:
         if not self._open:
             raise DeviceError("device is not open")
         applied = apply_limits(self.info, cfg)
+        for src in self.sources:  # build OFDM blocks now so no read stalls on first use
+            if src.kind == "ofdm":
+                self._ofdm_block(src, applied.center_hz, applied.sample_rate)
         if applied.sample_rate != self._cfg.sample_rate:
             self._t0 = time.monotonic()
             self._paced = 0
@@ -214,7 +222,12 @@ class SyntheticDevice:
     def _comb_fm(self, src, n0, n, fc, rate, amp):
         """A comb whose spacing moves: s(t) = s0 + fm_dev_hz*sin(2*pi*fm_rate_hz*t + fm_phase).
         Line k sits at freq_hz + k*s(t), so its excursion grows with k, as harmonics of a real
-        switcher do. A slow fm_rate_hz gives a near-linear drift over a few seconds."""
+        switcher do. A slow fm_rate_hz gives a near-linear drift over a few seconds.
+
+        With cycles(t) = s0*t + w(t), w the slow spacing wobble, the line sum is the geometric
+        series of the non-FM comb with every phasor multiplied by exp(2j*pi*m*w(t)) (m = 1, count
+        or k_lo). w changes slowly, so those three factors are evaluated on a coarse grid and
+        interpolated; the fast s0*t part comes from the cached phasors."""
         p = src.params
         s0 = p.get("spacing_hz", 68_000.0)
         dev, fr, ph = p["fm_dev_hz"], p.get("fm_rate_hz", 1.0), p.get("fm_phase", 0.0)
@@ -226,17 +239,28 @@ class SyntheticDevice:
         if k_hi < k_lo:
             return None
         count = k_hi - k_lo + 1
-        t = (n0 + np.arange(n)) / rate
-        cyc = s0 * t - dev / (2 * np.pi * fr) * (np.cos(2 * np.pi * fr * t + ph) - math.cos(ph))
-        theta = 2 * np.pi * np.mod(cyc, 1.0) + _GOLDEN_ANGLE
-        base = 2 * np.pi * np.mod((src.freq_hz - fc) * t + k_lo * cyc, 1.0) + k_lo * _GOLDEN_ANGLE
-        r = np.exp(1j * theta)
+        step = _SLOW_STEP
+        g0 = n0 // step
+        grid_t = (g0 + np.arange((n0 + n - 1) // step - g0 + 2)) * (step / rate)
+        w = -dev / (2 * np.pi * fr) * (np.cos(2 * np.pi * fr * grid_t + ph) - math.cos(ph))
+        w_cyc = 2 * np.pi * w
+        grids = np.stack([np.exp(1j * w_cyc), np.exp(1j * count * w_cyc),
+                          np.exp(1j * k_lo * w_cyc)]).astype(np.complex64)
+        e1, e_count, e_klo = _lerp_grid(grids, n0 - g0 * step, n, step)
+        r = self._phasor(s0, rate, n0, n) * e1 * np.complex64(cmath.exp(1j * _GOLDEN_ANGLE))
+        r_count = (self._phasor(count * s0, rate, n0, n) * e_count
+                   * np.complex64(cmath.exp(1j * ((count * _GOLDEN_ANGLE) % (2 * math.pi)))))
         den = 1 - r
-        small = np.abs(den) < 1e-9
-        den[small] = 1
-        lines = (1 - np.exp(1j * count * theta)) / den
-        lines[small] = count
-        out = (np.exp(1j * base) * lines).astype(np.complex64) * (amp * self._am(p, n0, n, rate))
+        small = np.abs(den) < 1e-6
+        if small.any():
+            den[small] = 1
+            lines = (1 - r_count) / den
+            lines[small] = count
+        else:
+            lines = (1 - r_count) / den
+        base = (self._phasor(src.freq_hz - fc + k_lo * s0, rate, n0, n) * e_klo
+                * np.complex64(cmath.exp(1j * ((k_lo * _GOLDEN_ANGLE) % (2 * math.pi)))))
+        out = (base * lines) * (amp * self._am(p, n0, n, rate))
         return self._pm(p, out, n0, n, rate)
 
     def _am(self, p: dict, n0: int, n: int, rate: float) -> np.ndarray:
@@ -252,15 +276,33 @@ class SyntheticDevice:
         index = p.get("pm_index", 0.0)
         if not index:
             return x
-        t = (n0 + np.arange(n)) / rate
-        return x * np.exp(1j * index * np.sin(2 * np.pi * p["pm_hz"] * t)).astype(np.complex64)
+        # pm_hz is far below the sample rate: evaluate the phasor on a coarse grid and interpolate
+        step = min(_SLOW_STEP, max(1, int(rate / 20_000)))
+        g0 = n0 // step
+        grid_t = (g0 + np.arange((n0 + n - 1) // step - g0 + 2)) * (step / rate)
+        grid = np.exp(1j * index * np.sin(2 * np.pi * p["pm_hz"] * grid_t)).astype(np.complex64)
+        return x * _lerp_grid(grid[None], n0 - g0 * step, n, step)[0]
 
     def _phase_walk(self, index: int, n: int, rate: float, fwhm_hz: float) -> np.ndarray:
-        """Random-walk phase noise; turns a carrier into a Lorentzian line fwhm_hz wide."""
+        """Random-walk phase noise; turns a carrier into a Lorentzian line fwhm_hz wide.
+        The walk is drawn every `step` samples and the phasor is interpolated between draws,
+        with step chosen so one draw moves the phase by at most about 0.2 rad."""
         sigma = math.sqrt(2 * math.pi * fwhm_hz / rate)
-        phase = self._walk.get(index, 0.0) + np.cumsum(self._rng.standard_normal(n) * sigma)
-        self._walk[index] = float(phase[-1] % (2 * math.pi))
-        return np.exp(1j * phase).astype(np.complex64)
+        step = max(1, int(0.04 / sigma ** 2))
+        start = self._walk.get(index, 0.0)
+        if step == 1:
+            phase = start + np.cumsum(self._rng.standard_normal(n) * sigma)
+            self._walk[index] = float(phase[-1] % (2 * math.pi))
+            return np.exp(1j * phase).astype(np.complex64)
+        m = -(-n // step) + 1
+        walk = np.cumsum(self._rng.standard_normal(m - 1)) * (sigma * math.sqrt(step))
+        grid = start + np.concatenate(([0.0], walk))
+        out = _lerp_grid(np.exp(1j * grid).astype(np.complex64)[None], 0, n, step)[0]
+        last = (n - 1) / step
+        i = int(last)
+        end = grid[i] + (grid[min(i + 1, m - 1)] - grid[i]) * (last - i)
+        self._walk[index] = float(end % (2 * math.pi))
+        return out
 
     def _gate(self, p: dict, index: int, n0: int, n: int, rate: float) -> np.ndarray:
         """On/off keying in slots of gate_slot_s seconds; each slot is on with probability gate_p."""
@@ -269,7 +311,6 @@ class SyntheticDevice:
         on = np.array([np.random.default_rng([self._seed, index, 7919, m]).random() < p.get("gate_p", 0.5)
                        for m in range(first, last + 1)], np.float32)
         return on[(n0 + np.arange(n)) // slot - first]
-
 
     def _buzz(self, src, n0, n, fc, rate, amp):
         p = src.params
@@ -290,6 +331,15 @@ class SyntheticDevice:
         return x * (np.abs(mains) * np.float32(np.sqrt(2)))
 
     def _ofdm(self, src, n0, n, fc, rate, amp):
+        wave = self._ofdm_block(src, fc, rate)
+        if wave is None:
+            return None
+        off = src.freq_hz - fc
+        seg = np.take(wave, np.arange(n) + n0 % wave.size, mode="wrap")
+        return (amp * seg) * self._phasor(off, rate, n0, n)
+
+    def _ofdm_block(self, src, fc, rate):
+        """The looped OFDM waveform for this tuning (None when out of span), built once and cached."""
         p = src.params
         bw = p.get("bw_hz", 400_000.0)
         spacing = p.get("spacing_hz", 4312.5)
@@ -304,9 +354,7 @@ class SyntheticDevice:
             wave = self._ofdm_cache[key] = _ofdm_wave(rate, bw, spacing, self._seed, shift_hz=off,
                                                       symbols=symbols, symbol_rate=symbol_rate,
                                                       notches=notches)
-        seg = np.take(wave, np.arange(n) + n0 % wave.size, mode="wrap")
-        return (amp * seg) * self._phasor(off, rate, n0, n)
-
+        return wave
 
     def _impulses(self, src, index, n, n0, rate, amp):
         """Bursts are generated per burst id from a seeded RNG, so their content does not depend on
@@ -353,7 +401,6 @@ class SyntheticDevice:
             out.append((int(round((phase + m / r + dt) * rate)), gain, m))
         return out
 
-
     def _pace(self, n: int, rate: float) -> None:
         self._paced += n
         delay = self._t0 + self._paced / rate - time.monotonic()
@@ -362,6 +409,24 @@ class SyntheticDevice:
         elif delay < -0.5:  # fell far behind (debugger, suspend): resynchronise
             self._t0 = time.monotonic()
             self._paced = 0
+
+
+@lru_cache(maxsize=16)
+def _ramp(step: int, length: int) -> np.ndarray:
+    """0, 1/step, ..., (step-1)/step repeated to `length` samples."""
+    return np.tile(np.arange(step, dtype=np.float32) / np.float32(step), -(-length // step))
+
+
+def _lerp_grid(grids: np.ndarray, offset: int, n: int, step: int) -> np.ndarray:
+    """Linearly interpolate each row of `grids` (values every `step` samples) at samples
+    offset .. offset + n - 1, giving an array of shape (rows, n)."""
+    cells = (offset + n - 1) // step + 1
+    start = grids[:, :cells]
+    slope = grids[:, 1:cells + 1] - start
+    ramp = _ramp(step, cells * step)
+    lo = np.repeat(start, step, axis=1)[:, offset:offset + n]
+    inc = np.repeat(slope, step, axis=1)[:, offset:offset + n]
+    return lo + inc * ramp[offset:offset + n]
 
 
 def _ofdm_wave(rate: float, bw: float, spacing: float, seed: int, shift_hz: float = 0.0,
