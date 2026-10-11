@@ -23,9 +23,12 @@ export function clampView(v: View, limit: View): View {
   return { loHz: lo, hiHz: lo + span };
 }
 
-export function zoomView(v: View, anchorHz: number, factor: number, limit: View, minSpanHz = 1000): View {
+/** `maxSpanHz` caps the zoomed-out width when `limit` is wider than the widest useful view. */
+export function zoomView(
+  v: View, anchorHz: number, factor: number, limit: View, minSpanHz = 1000, maxSpanHz = limit.hiHz - limit.loHz,
+): View {
   const span = v.hiHz - v.loHz;
-  const newSpan = clamp(span * factor, minSpanHz, limit.hiHz - limit.loHz);
+  const newSpan = clamp(span * factor, minSpanHz, Math.min(maxSpanHz, limit.hiHz - limit.loHz));
   const frac = (anchorHz - v.loHz) / span;
   const lo = anchorHz - frac * newSpan;
   return clampView({ loHz: lo, hiHz: lo + newSpan }, limit);

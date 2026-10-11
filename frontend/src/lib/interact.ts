@@ -9,6 +9,10 @@ export interface PlotInteractionOptions {
   getView(): View;
   getLimit(): View;
   setView(v: View): void;
+  /** Pan by a frequency delta; when absent the view is panned inside `getLimit()`. */
+  panBy?(deltaHz: number): void;
+  /** Zoom around an anchor; when absent the view is zoomed inside `getLimit()`. */
+  zoomAt?(anchorHz: number, factor: number): void;
   tune(hz: number): void;
   tuneBy(deltaHz: number): void;
   resetView(): void;
@@ -38,7 +42,9 @@ export function attachPlotInteractions(el: HTMLElement, o: PlotInteractionOption
     const px = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1);
     const mag = Math.min(Math.abs(px) / 100, 1) * 0.25 + 0.05;
     const factor = px > 0 ? 1 + mag : 1 / (1 + mag);
-    o.setView(zoomView(o.getView(), hzAt(e.clientX), factor, o.getLimit()));
+    const anchor = hzAt(e.clientX);
+    if (o.zoomAt) o.zoomAt(anchor, factor);
+    else o.setView(zoomView(o.getView(), anchor, factor, o.getLimit()));
   };
   const onDown = (e: PointerEvent) => {
     if (e.button !== 0) return;
@@ -60,6 +66,7 @@ export function attachPlotInteractions(el: HTMLElement, o: PlotInteractionOption
     const dx = e.clientX - lastX;
     lastX = e.clientX;
     if (tuningDrag) o.tuneBy(dx * hzPerPx);
+    else if (o.panBy) o.panBy(-dx * hzPerPx);
     else o.setView(panView(v, -dx * hzPerPx, o.getLimit()));
   };
   const onUp = (e: PointerEvent) => {

@@ -4,7 +4,8 @@ import {
 } from "./api";
 import { AudioPlayer } from "./audio";
 import { ReconnectingSocket } from "./ws";
-import { autoRange, passband, snapHz, type View } from "./freq";
+import { autoRange, panView, passband, snapHz, zoomView, type View } from "./freq";
+import { planPanRetune, planTuneRetune, RetuneController, type Range } from "./retune";
 import type { SpectrumFrame } from "./protocol";
 import type { PlotInteractionOptions } from "./interact";
 import { byFrequency, openConfig, recallPatch } from "./memories";
@@ -48,6 +49,29 @@ export function fullSpan(r: RadioState): View {
   return { loHz: r.center_hz - r.sample_rate / 2, hiHz: r.center_hz + r.sample_rate / 2 };
 }
 
+/** The selected (or running) device's tunable range, once the device list is known. */
+export function deviceRange(): Range | null {
+  const id = app.radio?.running ? app.radio.device_id : app.selectedDevice;
+  return app.devices.find((d) => d.id === id)?.freq_range ?? null;
+}
+
+/** Where the visible range may go: the whole device range while running (panning past the span edge
+ *  retunes the SDR), otherwise only the current span. */
+export function viewLimit(r: RadioState): View {
+  const range = r.running ? deviceRange() : null;
+  return range ? { loHz: range[0], hiHz: range[1] } : fullSpan(r);
+}
+
+/** Moves the SDR centre after the view was panned or zoomed past the edge of the span. */
+export const retune = new RetuneController({
+  plan: () => {
+    const r = app.radio;
+    const range = deviceRange();
+    return r?.running && range ? planPanRetune(app.view, fullSpan(r), range) : null;
+  },
+  send: (centerHz) => setRadio({ center_hz: centerHz }),
+});
+
 let pending: StatePatch = {};
 let inflight = false;
 
@@ -79,6 +103,15 @@ export async function setRadio(patch: StatePatch): Promise<void> {
   }
 }
 
+/** Tune the demodulator. A frequency in the outer 5 % of the span, or beyond it, moves the SDR centre
+ *  in the same request so the display keeps following. */
+export function tuneRadio(hz: number): Promise<void> {
+  const r = app.radio;
+  const range = deviceRange();
+  const centre = r && range ? planTuneRetune(hz, fullSpan(r), range) : null;
+  return setRadio(centre === null ? { tune_hz: hz } : { tune_hz: hz, center_hz: centre });
+}
+
 export function plotOptions(onCursor?: (x: number | null, y: number | null) => void): PlotInteractionOptions {
   return {
     getView: () => app.view,
@@ -86,12 +119,25 @@ export function plotOptions(onCursor?: (x: number | null, y: number | null) => v
     setView: (v) => {
       app.view = v;
     },
+    panBy: (delta) => {
+      const r = app.radio;
+      if (!r) return;
+      app.view = panView(app.view, delta, viewLimit(r));
+      retune.poke();
+    },
+    zoomAt: (anchor, factor) => {
+      const r = app.radio;
+      if (!r) return;
+      const span = fullSpan(r);
+      app.view = zoomView(app.view, anchor, factor, viewLimit(r), 1000, span.hiHz - span.loHz);
+      retune.poke();
+    },
     tune: (hz) => {
-      if (app.radio?.running) setRadio({ tune_hz: snapHz(hz, Math.min(app.stepHz, 1000)) });
+      if (app.radio?.running) void tuneRadio(snapHz(hz, Math.min(app.stepHz, 1000)));
     },
     tuneBy: (delta) => {
       const r = app.radio;
-      if (r?.running) setRadio({ tune_hz: Math.round(r.tune_hz + delta) });
+      if (r?.running) void tuneRadio(Math.round(r.tune_hz + delta));
     },
     resetView: () => {
       if (app.radio) app.view = fullSpan(app.radio);

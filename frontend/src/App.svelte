@@ -5,13 +5,15 @@
   import ErrorBanner from "./components/ErrorBanner.svelte";
   import Spectrum from "./components/Spectrum.svelte";
   import Waterfall from "./components/Waterfall.svelte";
+  import Splitter from "./components/Splitter.svelte";
   import StatusBar from "./components/StatusBar.svelte";
   import MemoriesDrawer from "./components/MemoriesDrawer.svelte";
   import MemoryDialog from "./components/MemoryDialog.svelte";
   import RdsCard from "./components/RdsCard.svelte";
   import TaSnackbar from "./components/TaSnackbar.svelte";
   import {
-    app, fullSpan, noteFrame, noteRds, reconcileAudio, recallMemory, refreshDevices, refreshMemories, setRadio,
+    app, fullSpan, noteFrame, noteRds, reconcileAudio, recallMemory, refreshDevices, refreshMemories, retune, tuneRadio,
+    viewLimit,
   } from "./lib/store.svelte";
   import { memoryKey } from "./lib/memories";
   import { getBandplan, getRds, getSettings, getState } from "./lib/api";
@@ -19,9 +21,12 @@
   import { parseSpectrumFrame } from "./lib/protocol";
   import { frameBus } from "./lib/framebus";
   import { clampView, snapHz } from "./lib/freq";
+  import { loadSplit } from "./lib/split";
   import type { ServerEvent } from "./lib/types";
 
   let statusH = $state(40);
+  let split = $state(loadSplit());
+  let cardEl = $state<HTMLElement>();
 
   const events = new ReconnectingSocket("/ws/events", {
     onStatus: (ok) => (app.connected = ok),
@@ -80,6 +85,8 @@
 
   // Keep the visible range inside the SDR span; jump to full span only when a retune moves the
   // tuned frequency out of view. Other state updates (averaging, gain, colours...) leave the zoom alone.
+  // While a pan-driven centre change is pending the view may run ahead of the span, and a tuned
+  // frequency that follows the new centre is not a reason to drop the zoom.
   let lastTune: number | null = null;
   $effect(() => {
     const r = app.radio;
@@ -88,10 +95,11 @@
     const tune = r.tune_hz;
     untrack(() => {
       const cur = app.view;
-      let next = cur.hiHz > cur.loHz ? clampView(cur, limit) : limit;
+      const following = retune.active;
+      let next = cur.hiHz > cur.loHz ? clampView(cur, following ? viewLimit(r) : limit) : limit;
       const retuned = tune !== lastTune;
       lastTune = tune;
-      if (retuned && (tune < next.loHz || tune > next.hiHz)) next = limit;
+      if (retuned && !following && (tune < next.loHz || tune > next.hiHz)) next = limit;
       if (next.loHz !== cur.loHz || next.hiHz !== cur.hiHz) app.view = next;
     });
   });
@@ -143,7 +151,7 @@
     if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
       e.preventDefault();
       const dir = e.key === "ArrowRight" ? 1 : -1;
-      setRadio({ tune_hz: snapHz(r.tune_hz + dir * app.stepHz, app.stepHz) });
+      void tuneRadio(snapHz(r.tune_hz + dir * app.stepHz, app.stepHz));
     }
   }
 </script>
@@ -154,8 +162,9 @@
   <div class="full"><TopBar /></div>
   <div class="full"><BandBar /></div>
   <div class="full">{#if app.radio?.running && app.radio.mode === "WFM"}<RdsCard />{/if}</div>
-  <main class="card">
+  <main class="card" bind:this={cardEl} style:--split="{split}fr" style:--rest="{100 - split}fr">
     <section class="spectrum" aria-label="Spectrum"><Spectrum /></section>
+    <Splitter bind:value={split} container={cardEl} />
     <section class="waterfall" aria-label="Waterfall"><Waterfall /></section>
   </main>
   {#if app.memoriesOpen}<MemoriesDrawer />{/if}
@@ -176,7 +185,7 @@
   /* Spectrum and waterfall share one card; the plots themselves are never animated. */
   .card {
     display: grid;
-    grid-template-rows: 3fr 7fr;
+    grid-template-rows: minmax(0, var(--split)) 8px minmax(0, var(--rest));
     min-height: 0;
     margin: 8px;
     border-radius: var(--md-shape-lg);
@@ -185,5 +194,4 @@
   }
   .full { grid-column: 1 / -1; min-width: 0; }
   .spectrum, .waterfall { position: relative; min-height: 0; }
-  .spectrum { border-bottom: 1px solid var(--md-outline-variant); }
 </style>
