@@ -17,6 +17,7 @@ from ..dsp.spectrum import SpectrumProcessor
 from ..sdr.base import DeviceConfig, DeviceError, DeviceInfo, SdrDevice
 from ..sdr.discovery import create_device
 from .broadcast import Broadcaster
+from .prebuffer import DEFAULT_PREBUFFER_S, IqSnapshot, PreBuffer
 from .state import AudioChunk, RadioState, SpectrumFrame, StatePatch, Stats
 
 log = logging.getLogger(__name__)
@@ -72,10 +73,13 @@ class _Run:
         self.stop = threading.Event()
         self.ring: queue.Queue = queue.Queue(maxsize=ring_size)
         self.threads: list[threading.Thread] = []
+        self.samples = 0  # samples read so far in this run (reader thread only)
+        self.prebuf: PreBuffer | None = None
 
 
 class RadioSession:
-    def __init__(self, device_factory: Callable[[str], SdrDevice] = create_device) -> None:
+    def __init__(self, device_factory: Callable[[str], SdrDevice] = create_device,
+                 prebuffer_s: float = DEFAULT_PREBUFFER_S) -> None:
         self._factory = device_factory
         self._life = threading.RLock()  # serialises open()/close()
         self._lock = threading.RLock()  # guards state and DSP
@@ -92,6 +96,9 @@ class RadioSession:
         self._block = 32768
         self._gen = 0
         self._seq = 0
+        self.prebuffer_s = prebuffer_s  # takes effect at the next open()
+        self._prebuf: PreBuffer | None = None  # the latest run's buffer; kept after close
+        self._gen_meta: tuple[float, float] = (0.0, 0.0)  # (center_hz, sample_rate) of generation _gen
         self.spectrum: Broadcaster[SpectrumFrame] = Broadcaster(maxsize=2)
         self.audio: Broadcaster[AudioChunk] = Broadcaster(maxsize=8)
         self.events: Broadcaster[dict] = Broadcaster(maxsize=64)
@@ -141,6 +148,18 @@ class RadioSession:
         with self._lock:
             return self._stats.model_copy(update={"clients": self.spectrum.subscriber_count})
 
+    @property
+    def current_generation(self) -> tuple[int, float, float]:
+        """(generation, center_hz, sample_rate) of the blocks the reader is producing now."""
+        with self._lock:
+            return (self._gen, *self._gen_meta)
+
+    def snapshot_iq(self, seconds: float | None = None) -> IqSnapshot | None:
+        """The last `seconds` of raw IQ (everything held when None), or None when the pre-buffer
+        is off or empty. The latest run's buffer is kept after close and after a device loss."""
+        prebuf = self._prebuf
+        return prebuf.snapshot(seconds) if prebuf is not None else None
+
     def open(self, device_id: str, patch: StatePatch | None = None) -> RadioState:
         with self._life:
             device = self._factory(device_id)
@@ -168,6 +187,7 @@ class RadioSession:
             demod.set_offset(merged.tune_hz - merged.center_hz)
             block = block_size_for(merged.sample_rate)
             run = _Run(device, max(4, math.ceil(RING_SECONDS * merged.sample_rate / block)))
+            run.prebuf = PreBuffer(self.prebuffer_s) if self.prebuffer_s > 0 else None
             with self._lock:
                 self._run = run
                 self._state = merged
@@ -176,6 +196,8 @@ class RadioSession:
                 self._demod = demod
                 self._block = block
                 self._gen += 1
+                self._gen_meta = (merged.center_hz, merged.sample_rate)
+                self._prebuf = run.prebuf
                 self._reset_rds()
             run.threads = [
                 threading.Thread(target=self._reader_loop, args=(run,), name="sdr-reader", daemon=True),
@@ -232,13 +254,14 @@ class RadioSession:
                         raise DeviceError("device not responding")
                     try:
                         applied = device.configure(self._device_config(new))
+                        new = self._with_applied(new, applied)
+                        # Blocks are labelled with centre and rate; only a change to either makes
+                        # in-flight blocks and the pending frame stale. Gain/ppm changes keep them.
+                        if (new.center_hz, new.sample_rate) != (old.center_hz, old.sample_rate):
+                            self._gen += 1
+                            self._gen_meta = (new.center_hz, new.sample_rate)
                     finally:
                         self._dev_lock.release()
-                    new = self._with_applied(new, applied)
-                    # Blocks are labelled with centre and rate; only a change to either makes
-                    # in-flight blocks and the pending frame stale. Gain/ppm changes keep them.
-                    if (new.center_hz, new.sample_rate) != (old.center_hz, old.sample_rate):
-                        self._gen += 1
                 self._apply_dsp(old, new, plan)
             self._state = new
             if self._rds_stale(old, new):
@@ -367,13 +390,17 @@ class RadioSession:
         while not run.stop.is_set():
             try:
                 with self._dev_lock:
-                    gen = self._gen
+                    gen, (center, rate) = self._gen, self._gen_meta
                     block = device.read(self._block)
             except Exception as exc:
                 if not run.stop.is_set():
                     log.warning("device read failed: %s", exc)
                     self._fail(run, exc)
                 return
+            index = run.samples
+            run.samples += block.size
+            if run.prebuf is not None:
+                run.prebuf.write(block, gen, center, rate, index)
             try:
                 ring.put_nowait((gen, block))
             except queue.Full:

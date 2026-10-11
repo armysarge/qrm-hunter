@@ -510,3 +510,11 @@ def test_wfm_memory(client):
     assert r.status_code == 201 and r.json()["mode"] == "WFM"
     assert client.post("/api/memories", json={**body, "bw_hz": 2700}).status_code == 422
     assert client.post("/api/memories", json={**MEMORY, "bw_hz": 180_000}).status_code == 422
+
+
+def test_prebuffer_setting_is_validated_and_applied_to_the_session(client):
+    r = client.patch("/api/settings", json={"prebuffer_s": 3})
+    assert r.status_code == 200 and r.json()["prebuffer_s"] == 3
+    assert client.session.prebuffer_s == 3
+    assert client.patch("/api/settings", json={"prebuffer_s": 61}).status_code == 422
+    assert client.patch("/api/settings", json={"prebuffer_s": -1}).status_code == 422

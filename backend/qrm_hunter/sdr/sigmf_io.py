@@ -13,6 +13,20 @@ from .base import DeviceError
 
 _BYTES_PER_SAMPLE = {"cf32_le": 8, "ci16_le": 4, "cu8": 2}
 
+CI16_SCALE = 32767.0  # full scale 1.0 complex64 <-> 32767
+
+
+def to_ci16(iq: np.ndarray) -> np.ndarray:
+    """Interleaved little-endian int16 I/Q, clipped symmetrically to full scale (+-32767), so that
+    -1.0 round-trips exactly and -32768 never appears."""
+    f = np.ascontiguousarray(iq, dtype=np.complex64).view(np.float32)
+    return np.clip(np.rint(f * CI16_SCALE), -CI16_SCALE, CI16_SCALE).astype(np.int16)
+
+
+def from_ci16(raw: np.ndarray) -> np.ndarray:
+    f = np.asarray(raw, dtype=np.int16).astype(np.float32) / CI16_SCALE
+    return (f[0::2] + 1j * f[1::2]).astype(np.complex64)
+
 
 @dataclass(frozen=True)
 class SigmfRecording:
@@ -77,7 +91,7 @@ def load_iq(rec: SigmfRecording) -> np.ndarray:
             return np.empty(0, np.complex64)
         return np.memmap(rec.data_path, dtype=np.complex64, mode="r", shape=(rec.num_samples,))
     if rec.datatype == "ci16_le":
-        f = np.fromfile(rec.data_path, dtype="<i2").astype(np.float32) / 32768.0
+        return from_ci16(np.fromfile(rec.data_path, dtype="<i2"))
     else:  # cu8
         f = (np.fromfile(rec.data_path, dtype=np.uint8).astype(np.float32) - 127.5) / 127.5
     return (f[0::2] + 1j * f[1::2]).astype(np.complex64)

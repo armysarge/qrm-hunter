@@ -12,7 +12,7 @@ from typing import Literal
 
 import tomli_w
 from platformdirs import user_config_dir
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +25,7 @@ class Settings(BaseModel):
     last_device_id: str | None = None
     last_tune_hz: int = 7_100_000
     token: str | None = None
+    prebuffer_s: float = Field(10.0, ge=0, le=60)
 
 
 class SettingsPatch(BaseModel):
@@ -36,6 +37,7 @@ class SettingsPatch(BaseModel):
     mains_hz: Literal[50, 60, "auto"] | None = None
     theme: Literal["dark", "light"] | None = None
     colormap: Literal["turbo", "viridis", "grey"] | None = None
+    prebuffer_s: float | None = Field(None, ge=0, le=60)
 
 
 def default_settings_path() -> Path:

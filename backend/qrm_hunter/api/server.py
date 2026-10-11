@@ -194,6 +194,7 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
     app.add_middleware(RequestGuard, loopback_only=token is None)
     app.state.settings = store.load()
     session.set_region(app.state.settings.region)
+    session.prebuffer_s = app.state.settings.prebuffer_s
     app.state.memories = memory_store.load()
     _restore_last_session(session, app.state.settings)
 
@@ -286,6 +287,7 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
     def patch_settings(patch: SettingsPatch) -> dict:
         settings = save_settings(**patch.model_dump(exclude_unset=True, exclude_none=True))
         session.set_region(settings.region)  # WFM de-emphasis and the RDS programme type table
+        session.prebuffer_s = settings.prebuffer_s
         return settings.model_dump(exclude={"token"})
 
     @api.get("/memories")
