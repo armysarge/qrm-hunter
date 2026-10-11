@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field, fields
 from types import SimpleNamespace
-from typing import Callable, Literal
+from typing import Literal
 
 import numpy as np
 from scipy.signal import find_peaks
+from scipy.stats import kurtosis
 
-from .spectra import Psd, StftStats, floor_curve_db
+from ..dsp.extract import extract_span
+from .spectra import Psd, StftStats, floor_curve_db, stft_pass, welch_psd
 
 FEATURE_VERSION = 1
 MIN_SECONDS = 2.0
@@ -103,6 +106,8 @@ class Cancelled(Exception):
 
 # --- level -------------------------------------------------------------------------------------
 
+SLOPE_MIN_SPAN_HZ = 100_000.0  # below this span the floor slope is not measurable
+
 @dataclass(frozen=True)
 class LevelResult:
     floor_db: float
@@ -127,7 +132,11 @@ def level_features(psd: Psd) -> LevelResult:
         i0, i1 = int(np.searchsorted(c, 0.005)), int(np.searchsorted(c, 0.995))
         occ_bw = float((i1 - i0 + 1) * psd.bin_hz)
     mhz = (psd.freqs_hz - psd.freqs_hz.mean()) / 1e6
-    slope = float(np.polyfit(mhz, curve, 1)[0])
+    # over a narrow span the running-median floor's edge effects dominate the fit
+    if psd.nfft * psd.bin_hz < SLOPE_MIN_SPAN_HZ:
+        slope = NAN
+    else:
+        slope = float(np.polyfit(mhz, curve, 1)[0])
     return LevelResult(float(np.median(curve)), occ_bw, slope, ref, curve, occupied)
 
 
@@ -299,3 +308,260 @@ def track_lines(stats: StftStats, windows: list[tuple[int, int]], bin_hz: float)
     if not drifts:
         return NAN, NAN
     return float(np.median(drifts)), float(math.exp(-float(np.median(spreads)) / STABILITY_SCALE_HZ))
+
+
+# --- mains -------------------------------------------------------------------------------------
+
+MAINS_FAMILIES = (50.0, 60.0)
+ENV_REGION_HZ = 1_200.0  # half-width of the region around the strongest line
+ENV_MAX_HZ = 1_000.0
+ENV_RES_HZ = 0.25
+ENV_BLOCK_RATE = 5_000.0
+MAINS_MIN_DEPTH = 0.03
+HARMONIC_MIN_INDEX = 0.05
+
+
+@dataclass(frozen=True)
+class MainsResult:
+    hz: float
+    depth: float
+    harmonics: float
+
+
+def mains_envelope(iq: np.ndarray, rate: float, center_hz: float, lines: LineSet) -> tuple[np.ndarray, float]:
+    if lines.count:
+        f = float(lines.freqs_hz[int(np.argmax(lines.heights_db))])
+        ex = extract_span(iq, rate, center_hz, f - ENV_REGION_HZ, f + ENV_REGION_HZ)
+        return np.abs(ex.iq).astype(np.float64), ex.rate
+    block = max(1, int(rate // ENV_BLOCK_RATE))
+    n = iq.size // block * block
+    env = np.abs(np.asarray(iq[:n], np.complex64)).reshape(-1, block).mean(axis=1)
+    return env.astype(np.float64), rate / block
+
+
+def mains_features(env: np.ndarray, env_rate: float, ctx: AnalysisContext) -> MainsResult:
+    dc = float(np.mean(env))
+    if dc <= 0 or env.size < 16:
+        return MainsResult(NAN, NAN, NAN)
+    win = np.hanning(env.size)
+    nfft = max(env.size, int(np.ceil(env_rate / ENV_RES_HZ)))  # zero-pad to <= 0.25 Hz bins
+    spec = np.abs(np.fft.rfft((env - dc) * win, nfft))
+    freqs = np.fft.rfftfreq(nfft, 1 / env_rate)
+    scale = 2.0 / (dc * float(win.sum()))  # spectrum value -> modulation index
+
+    def index_at(f: float) -> float:
+        sel = np.abs(freqs - f) <= 0.5
+        return float(spec[sel].max()) * scale if sel.any() else 0.0
+
+    band = (freqs > 20) & (freqs <= ENV_MAX_HZ)
+    background = float(np.median(spec[band])) * scale if band.any() else 0.0
+    families = {f: [index_at(n * f) for n in range(1, int(ENV_MAX_HZ // f) + 1)] for f in MAINS_FAMILIES}
+    if ctx.mains_hz in (50, 60):
+        f = float(ctx.mains_hz)
+    else:
+        f = max(MAINS_FAMILIES, key=lambda fam: sum(families[fam][:6]))
+    idx = families[f]
+    depth = max(idx[0], idx[1])
+    if ctx.mains_hz == "auto" and depth < MAINS_MIN_DEPTH:
+        return MainsResult(NAN, 0.0, 0.0)
+    threshold = max(HARMONIC_MIN_INDEX, 4 * background)
+    return MainsResult(f, depth, float(sum(1 for m in idx if m >= threshold)))
+
+
+# --- impulses ----------------------------------------------------------------------------------
+
+IMP_BLOCK_S = 100e-6  # power is averaged over 100 us blocks before thresholding
+IMP_SIGMA = 6.0
+IMP_MERGE_S = 1e-3
+
+
+@dataclass(frozen=True)
+class ImpulseResult:
+    rate_hz: float
+    kurtosis: float
+    crest_db: float
+    periodicity: float
+    period_s: float
+    event_times_s: np.ndarray = field(repr=False)
+
+
+def impulse_features(iq: np.ndarray, rate: float) -> ImpulseResult:
+    a = np.abs(np.asarray(iq, np.complex64))
+    rms = float(np.sqrt(np.mean(a.astype(np.float64) ** 2)))
+    crest = 20 * math.log10(float(a.max()) / rms) if rms > 0 else NAN
+    kurt = float(kurtosis(a, fisher=False))
+    block = max(1, int(round(rate * IMP_BLOCK_S)))
+    n = a.size // block * block
+    p = np.square(a[:n].astype(np.float64)).reshape(-1, block).mean(axis=1)
+    med = float(np.median(p))
+    sigma = max(1.4826 * float(np.median(np.abs(p - med))), 0.05 * med)  # robust (MAD) sigma
+    above = np.flatnonzero(p > med + IMP_SIGMA * sigma)
+    merge = max(1, int(round(IMP_MERGE_S * rate / block)))
+    starts = above[np.insert(np.diff(above) > merge, 0, True)] if above.size else above
+    times = starts * block / rate
+    periodicity = period = NAN
+    if times.size >= 3:
+        gaps = np.diff(times)
+        period = float(np.median(gaps))
+        r = gaps / period
+        k = np.round(r)
+        # fraction of gaps that are a whole number of periods: missed pulses do not count against it
+        periodicity = float(np.mean((k >= 1) & (np.abs(r - k) <= 0.1)))
+    return ImpulseResult(times.size / (iq.size / rate), kurt, crest, periodicity, period, times)
+
+
+# --- OFDM --------------------------------------------------------------------------------------
+
+OFDM_GRIDS = (4312.5, 24_414.0625)  # VDSL; HomePlug AV PLC
+OFDM_TOL = 0.02
+OFDM_MIN_CORR = 0.04  # carrier-grid correlation at the grid's period (0-1)
+OFDM_CONTRAST = 1.5  # ... and this many times the correlation well away from it
+OFDM_SIDE = 0.15  # "well away": periods off by at least 15 %
+OFDM_EDGE_HZ = 1_000.0
+_OFDM_STEPS = np.linspace(1 - 2 * OFDM_SIDE, 1 + 2 * OFDM_SIDE, 121)  # trial periods, x 1/grid
+
+
+@dataclass(frozen=True)
+class OfdmResult:
+    spacing_hz: float
+    flatness: float
+    edges_db: float
+
+
+def _widest_run(mask: np.ndarray) -> tuple[int, int]:
+    best, start = (0, 0), None
+    for i, v in enumerate(np.append(mask, False)):
+        if v and start is None:
+            start = i
+        elif not v and start is not None:
+            if i - start > best[1] - best[0]:
+                best = (start, i)
+            start = None
+    return best
+
+
+def _grid_correlation(density: np.ndarray, bin_hz: float, grid: float) -> np.ndarray:
+    """|sum P(f) exp(2j*pi*f*tau)| / sum P(f) for tau = _OFDM_STEPS / grid.
+
+    This is the normalised autocorrelation of the signal at lag tau. An OFDM symbol is longer
+    than 1/grid (cyclic prefix, or simply a symbol rate below the carrier spacing), so every
+    carrier repeats itself 1/grid later within the symbol: a peak at tau = 1/grid whose height is
+    the repeated fraction of the symbol. Narrow lines and smooth noise blocks give no such peak.
+    """
+    f = np.arange(density.size) * bin_hz
+    tau = _OFDM_STEPS / grid
+    return np.abs(np.exp(2j * np.pi * np.outer(tau, f)) @ density) / float(density.sum())
+
+
+def ofdm_features(psd: Psd, level: LevelResult) -> OfdmResult:
+    a, b = _widest_run(level.curve > level.ref_db + 3.0)
+    if (b - a) * psd.bin_hz < 4 * OFDM_GRIDS[0]:
+        return OfdmResult(NAN, NAN, NAN)
+    region = psd.density[a:b]
+    flatness = float(np.exp(np.mean(np.log(region + 1e-30))) / np.mean(region))
+    w = max(1, int(OFDM_EDGE_HZ / psd.bin_hz))
+    c = level.curve
+    rise = c[min(a + w, c.size - 1)] - c[max(a - w, 0)]
+    fall = c[max(b - 1 - w, 0)] - c[min(b - 1 + w, c.size - 1)]
+    edges = float((rise + fall) / 2)
+    # narrow lines (a comb riding on a noise block) are clipped to just above the floor curve
+    clipped = np.minimum(region, 10 ** ((c[a:b] + 3.0) / 10))
+    near = np.flatnonzero(np.abs(_OFDM_STEPS - 1) <= OFDM_TOL + 1e-9)
+    away = np.abs(_OFDM_STEPS - 1) >= OFDM_SIDE
+    best, best_corr = NAN, OFDM_MIN_CORR
+    for grid in OFDM_GRIDS:
+        if (b - a) * psd.bin_hz < 4 * grid:
+            continue
+        rho = _grid_correlation(clipped, psd.bin_hz, grid)
+        k = int(near[int(np.argmax(rho[near]))])
+        if k in (near[0], near[-1]) or rho[k] < OFDM_CONTRAST * float(rho[away].max()):
+            continue  # no interior peak, or no stronger than the off-grid correlation
+        if rho[k] > best_corr:
+            d = float(_parabolic(rho[k - 1:k], rho[k:k + 1], rho[k + 1:k + 2])[0])
+            step = _OFDM_STEPS[1] - _OFDM_STEPS[0]
+            best, best_corr = grid / (_OFDM_STEPS[k] + d * step), float(rho[k])
+    return OfdmResult(best, flatness, edges)
+
+
+# --- time --------------------------------------------------------------------------------------
+
+FRAME_S = 0.05
+ON_DB = 6.0
+
+
+@dataclass(frozen=True)
+class TimeResult:
+    duty: float
+    persistence: float
+    on_off_period_s: float
+
+
+def time_features(stats: StftStats, level: LevelResult, mask_bins: int) -> TimeResult:
+    per = max(1, int(round(FRAME_S / stats.hop_s)))
+    n = stats.energy.size // per
+    if n < 2 or mask_bins == 0:
+        return TimeResult(NAN, NAN, NAN)
+    e = stats.energy[:n * per].reshape(n, per).mean(axis=1)
+    noise = 10 ** (level.ref_db / 10) * mask_bins
+    persistence = float(np.mean(e >= noise * 10 ** (ON_DB / 10)))
+    if not level.occupied.any():
+        return TimeResult(NAN, persistence, NAN)
+    e_db = 10 * np.log10(e + 1e-30)
+    on = e_db >= np.percentile(e_db, 90) - ON_DB
+    onsets = np.flatnonzero(on[1:] & ~on[:-1]) + 1
+    period = float(np.median(np.diff(onsets)) * per * stats.hop_s) if onsets.size >= 3 else NAN
+    return TimeResult(float(on.mean()), persistence, period)
+
+
+def floor_rise_db(floor_db: float, seg_floor_db: np.ndarray, ctx: AnalysisContext) -> float:
+    if ctx.baseline_db is not None:
+        return float(floor_db - ctx.baseline_db)
+    if seg_floor_db.size == 0:
+        return NAN
+    return float(np.median(seg_floor_db) - np.percentile(seg_floor_db, 10))
+
+
+# --- the extractor -----------------------------------------------------------------------------
+
+def extract_features(iq: np.ndarray, rate: float, center_hz: float,
+                     ctx: AnalysisContext = AnalysisContext(),
+                     check: Callable[[], None] | None = None) -> Features:
+    x = np.asarray(iq, np.complex64)
+    if x.size < MIN_SECONDS * rate:
+        raise ShortInput(f"need at least {MIN_SECONDS:g} s of data at this frequency")
+    check = check or (lambda: None)
+    check()
+    psd = welch_psd(x, rate, center_hz)
+    level = level_features(psd)
+    lines = find_lines(psd, level.curve, ctx.dc_hz)
+    comb = fit_comb(psd, level.curve, lines)
+    check()
+    windows = track_windows(psd, lines, comb)
+    mask = level.occupied if level.occupied.any() else np.ones(psd.nfft, bool)
+    stats = stft_pass(x, rate, psd.nfft, mask, windows)
+    drift, stability = track_lines(stats, windows, psd.bin_hz) if comb else (NAN, NAN)
+    check()
+    env, env_rate = mains_envelope(x, rate, center_hz, lines)
+    mains = mains_features(env, env_rate, ctx)
+    imp = impulse_features(x, rate)
+    check()
+    ofdm = ofdm_features(psd, level)
+    tm = time_features(stats, level, int(mask.sum()))
+    return Features(
+        floor_db=level.floor_db,
+        floor_rise_db=floor_rise_db(level.floor_db, stats.floor_db, ctx),
+        occupied_bw_hz=level.occupied_bw_hz,
+        slope_db_per_mhz=level.slope_db_per_mhz,
+        lines_count=float(lines.count),
+        lines_width_hz=float(np.median(lines.widths_hz)) if lines.count else NAN,
+        comb_spacing_hz=comb.spacing_hz if comb else NAN,
+        comb_count=float(comb.count) if comb else 0.0,
+        comb_stability=stability,
+        comb_drift_hz_s=drift,
+        comb_width_hz=comb.width_hz if comb else NAN,
+        mains_hz=mains.hz, mains_depth=mains.depth, mains_harmonics=mains.harmonics,
+        imp_rate_hz=imp.rate_hz, imp_kurtosis=imp.kurtosis, imp_crest_db=imp.crest_db,
+        imp_periodicity=imp.periodicity, imp_period_s=imp.period_s,
+        ofdm_spacing_hz=ofdm.spacing_hz, ofdm_flatness=ofdm.flatness, ofdm_edges_db=ofdm.edges_db,
+        time_duty=tm.duty, time_persistence=tm.persistence, time_on_off_period_s=tm.on_off_period_s,
+    )

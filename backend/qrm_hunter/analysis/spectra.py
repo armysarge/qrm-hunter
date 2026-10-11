@@ -65,7 +65,9 @@ def floor_curve_db(psd_db: np.ndarray, bin_hz: float) -> np.ndarray:
 class StftStats:
     hop_s: float
     energy: np.ndarray  # per segment: summed density over the mask bins
-    floor_db: np.ndarray  # per segment: median density in dB over all bins
+    # per segment: median density in dB over all bins. For noise each bin's power is exponentially
+    # distributed, whose median is ln 2 times the mean: about 1.6 dB below the mean density.
+    floor_db: np.ndarray
     windows: list[np.ndarray]  # per window: (segments, width) linear density
 
 
@@ -86,7 +88,7 @@ def stft_pass(iq: np.ndarray, rate: float, nfft: int, mask: np.ndarray,
         rows = slice(i, i + p.shape[0])
         if use_mask:
             energy[rows] = p[:, mask].sum(axis=1)
-        floor[rows] = 10 * np.log10(np.median(p, axis=1) + 1e-30)
+        floor[rows] = 10 * np.log10(np.median(p, axis=1) + 1e-30)  # median: see StftStats.floor_db
         for k, (a, b) in enumerate(windows):
             out[k][rows] = p[:, a:b]
     return StftStats((nfft // 2) / rate, energy, floor, out)

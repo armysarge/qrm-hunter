@@ -13,7 +13,7 @@ from qrm_hunter.analysis.features import (
     track_lines,
     track_windows,
 )
-from qrm_hunter.analysis.spectra import stft_pass, welch_psd
+from qrm_hunter.analysis.spectra import StftStats, stft_pass, welch_psd
 from qrm_hunter.sdr.synthetic import CLIP_CENTER_HZ as C
 from qrm_hunter.sdr.synthetic import CLIP_RATE as RATE
 from qrm_hunter.sdr.synthetic import Source, render_clip, render_profile_clip
@@ -128,3 +128,27 @@ def test_stft_pass_energy_and_floor():
     assert stats.hop_s == pytest.approx(4096 / RATE)
     assert stats.energy.shape == stats.floor_db.shape and stats.windows[0].shape[1] == 10
     assert np.median(stats.floor_db) == pytest.approx(10 * math.log10(1e-4 / RATE), abs=2.0)
+
+
+@pytest.mark.parametrize("db_per_mhz", [40.0, -40.0])
+def test_floor_slope_sign_and_units(db_per_mhz):
+    x = noise(2.0, 1e-6)
+    spec = np.fft.fft(x)
+    f_mhz = np.fft.fftfreq(x.size, 1 / RATE) / 1e6
+    tilted = np.fft.ifft(spec * 10 ** (db_per_mhz * f_mhz / 20)).astype(np.complex64)
+    _, level, _, _ = spectral(tilted)
+    assert level.slope_db_per_mhz == pytest.approx(db_per_mhz, abs=2.0)
+
+
+def test_slope_is_not_measured_over_a_narrow_span():
+    rate = 12_500.0
+    rng = np.random.default_rng(0)
+    x = (rng.normal(size=int(2 * rate)) + 1j * rng.normal(size=int(2 * rate))).astype(np.complex64)
+    assert math.isnan(level_features(welch_psd(x, rate, C)).slope_db_per_mhz)
+
+
+def test_tracking_without_windows_or_frames_is_not_measurable():
+    hop = 0.01
+    assert all(math.isnan(v) for v in track_lines(StftStats(hop, np.zeros(100), np.zeros(100), []), [], 30.0))
+    short = StftStats(hop, np.zeros(25), np.zeros(25), [np.ones((25, 7))])  # 2 frames of 0.1 s
+    assert all(math.isnan(v) for v in track_lines(short, [(0, 7)], 30.0))
