@@ -107,11 +107,13 @@ export function noteRds(next: RdsState | null): void {
   app.rds = next;
 }
 
-/** Tune to a band chip, switching to and from WFM for the FM broadcast band. */
-export function tuneBand(band: Band): void {
+/** Tune to a band chip, switching to and from WFM for the FM broadcast band. The mode to restore
+ *  is remembered only once the engine has accepted the switch (WFM needs at least 1 MS/s; a
+ *  refusal shows the engine's message and leaves the mode as it was). */
+export async function tuneBand(band: Band): Promise<void> {
   const choice = selectBand(band, app.radio?.mode, app.prevMode);
-  app.prevMode = choice.prevMode;
-  void setRadio(choice.patch);
+  await setRadio(choice.patch);
+  if (choice.patch.mode === undefined || app.radio?.mode === choice.patch.mode) app.prevMode = choice.prevMode;
 }
 
 export const player = new AudioPlayer();

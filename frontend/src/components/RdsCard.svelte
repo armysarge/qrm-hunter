@@ -70,7 +70,7 @@
     letter-spacing: 0.04em;
     white-space: pre;
   }
-  .meta { color: var(--md-on-surface-variant); white-space: nowrap; }
+  .meta { color: var(--md-on-surface-variant); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .dim { color: var(--md-on-surface-variant); opacity: 0.7; }
 
   .now {
@@ -131,7 +131,8 @@
   /* Narrow: station and flags on the first line, now playing (and clock) below. */
   @media (max-width: 760px) {
     .rds { flex-wrap: wrap; padding: 8px 8px 8px 12px; gap: 4px 12px; }
-    .station { flex: 1; }
+    .station { flex: 1; min-width: 0; }
+    .ps { overflow: hidden; text-overflow: ellipsis; }
     .ps { font-size: 20px; line-height: 26px; }
     .icon { font-size: 24px; }
     .chips { order: 0; }

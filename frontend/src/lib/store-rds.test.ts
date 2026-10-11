@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const patchState = vi.fn(async (p: unknown) => ({ ...(p as object), running: true }));
-vi.mock("./api", () => ({ patchState: (p: unknown) => patchState(p), getState: vi.fn() }));
+const patchState = vi.fn(async (p: unknown) => ({ ...(p as object), running: true }) as unknown);
+const getState = vi.fn();
+vi.mock("./api", () => ({ patchState: (p: unknown) => patchState(p), getState: () => getState() }));
 
 import { app, noteRds, tuneBand } from "./store.svelte";
 import type { Band, RdsState } from "./types";
@@ -18,6 +19,7 @@ beforeEach(() => {
   app.taSnack = null;
   app.prevMode = null;
   patchState.mockClear();
+  app.error = null;
 });
 
 describe("RDS in the store", () => {
@@ -44,14 +46,27 @@ describe("RDS in the store", () => {
 describe("tuneBand", () => {
   it("goes to WFM on the broadcast band and back to the previous mode", async () => {
     app.radio = { running: true, mode: "USB", tune_hz: 14_074_000 } as any;
-    tuneBand(BC);
+    const pending = tuneBand(BC);
     expect(app.radio!.mode).toBe("WFM"); // optimistic
     expect(patchState).toHaveBeenLastCalledWith({ tune_hz: 97_750_000, mode: "WFM" });
-    await Promise.resolve();
+    await pending;
     expect(app.prevMode).toBe("USB");
     app.radio = { running: true, mode: "WFM", tune_hz: 97_750_000 } as any;
-    tuneBand(M20);
+    await tuneBand(M20);
     expect(patchState).toHaveBeenLastCalledWith({ tune_hz: 14_175_000, mode: "USB" });
+    expect(app.prevMode).toBeNull();
+  });
+});
+
+describe("tuneBand when the engine refuses WFM", () => {
+  it("shows the engine's message and remembers nothing", async () => {
+    const msg = "Broadcast FM needs a sample rate of at least 1 MS/s";
+    patchState.mockRejectedValueOnce(new Error(msg));
+    getState.mockResolvedValueOnce({ running: true, mode: "USB", tune_hz: 14_074_000, sample_rate: 250_000 });
+    app.radio = { running: true, mode: "USB", tune_hz: 14_074_000, sample_rate: 250_000 } as any;
+    await tuneBand(BC);
+    expect(app.error).toBe(msg);
+    expect(app.radio!.mode).toBe("USB");
     expect(app.prevMode).toBeNull();
   });
 });
