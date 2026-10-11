@@ -1,8 +1,8 @@
 """Stateful AM/SSB/CW/FM/WFM demodulator: NCO -> multistage FIR decimation -> channel filter -> detector -> AGC.
 
 Broadcast FM (WFM) decimates to an MPX rate of about 250 kHz, discriminates to the MPX signal (kept
-in `mpx` for the RDS decoder), detects the 19 kHz stereo pilot, then low-passes, decimates and
-de-emphasises the mono sum to about 32 kHz audio.
+in `mpx` for the RDS decoder), detects the 19 kHz stereo pilot, then de-emphasises, low-passes and
+decimates the mono sum to about 32 kHz audio.
 """
 
 from __future__ import annotations
@@ -32,6 +32,11 @@ WFM_DEVIATION_HZ = 75_000.0  # MPX = 1.0 at full broadcast deviation
 WFM_AUDIO_CUTOFF_HZ = 15_000.0
 WFM_AUDIO_GAIN = 0.5
 _WFM_CHANNEL_TAPS = 129
+# The WFM front decimator has to pass up to the channel edge (0.45 x the MPX rate) flat, so it uses
+# a cutoff at the output Nyquist and longer filters than the narrowband stages: about 35 kHz of
+# transition, flat to ~110 kHz at a 256 kHz MPX rate, and what aliases lands outside the channel.
+_WFM_STAGE_CUTOFF = 1.0
+_WFM_STAGE_SPAN = 24
 PILOT_HZ = 19_000.0
 
 
@@ -213,13 +218,18 @@ class Demodulator:
         self.mpx = np.empty(0, np.float32)  # WFM: the latest block's MPX, for the RDS decoder
         self.mpx_rate = 0.0
         self.stereo = False  # WFM: 19 kHz pilot present
+        self.pilot: PilotDetector | None = None  # WFM: the pilot detector (level, offset, stereo)
         self.offset_hz = 0.0
         self.set_offset(offset_hz)
         self.set_mode(mode, bw_hz)
 
     def _plan_stages(self, target: float) -> tuple[list[Decimator], float]:
         factors = choose_decimation(self.in_rate, target)
-        return [Decimator(f) for f in factors], self.in_rate / math.prod(factors)
+        if target == WFM_MPX_RATE:
+            stages = [Decimator(f, _WFM_STAGE_CUTOFF, _WFM_STAGE_SPAN) for f in factors]
+        else:
+            stages = [Decimator(f) for f in factors]
+        return stages, self.in_rate / math.prod(factors)
 
     def set_offset(self, hz: float) -> None:
         if abs(hz) >= self.in_rate / 2:
@@ -245,10 +255,13 @@ class Demodulator:
             lo, hi = -(bw + 100.0), -100.0
         else:  # CW, after the BFO shift
             lo, hi = CW_PITCH_HZ - bw / 2, CW_PITCH_HZ + bw / 2
-        if not bw >= 50.0 or max(abs(lo), abs(hi)) >= 0.45 * stage_rate:
+        # WFM clamps its channel filter to the MPX rate instead (see _setup_wfm), so every
+        # bandwidth the radio state allows works at every rate of at least 1 MS/s.
+        if not bw >= 50.0 or (mode != "WFM" and max(abs(lo), abs(hi)) >= 0.45 * stage_rate):
             # nothing has been changed yet: the demodulator stays exactly as it was
             raise ValueError(f"bandwidth {bw_hz} Hz invalid for mode {mode} (need >= 50 Hz and "
                              f"passband edge < {0.45 * stage_rate:.0f} Hz)")
+        was_wfm = getattr(self, "mode", None) == "WFM"
         self._stages, self.stage_rate, self._target_rate = stages, stage_rate, target
         self.mode = mode
         self.bw_hz = bw
@@ -256,7 +269,7 @@ class Demodulator:
         self.mpx = np.empty(0, np.float32)
         self.stereo = False
         if mode == "WFM":
-            self._setup_wfm(bw)
+            self._setup_wfm(bw, keep_pilot=was_wfm)
             return
         self.out_rate = stage_rate
         centre, half = (lo + hi) / 2, (hi - lo) / 2
@@ -265,26 +278,35 @@ class Demodulator:
         self._chan = (lp * np.exp(2j * np.pi * centre * n / self.out_rate)).astype(np.complex64)
         self._chan_zi = np.zeros(_CHANNEL_TAPS - 1, np.complex64)
 
-    def _setup_wfm(self, bw: float) -> None:
+    def _setup_wfm(self, bw: float, keep_pilot: bool) -> None:
+        keep_pilot = keep_pilot and self.pilot is not None and self.mpx_rate == self.stage_rate
         rate = self.mpx_rate = self.stage_rate
         # Real taps (the channel is centred on the carrier), applied by overlap-add: a 129-tap
         # direct-form filter at 256 kHz would cost more than the rest of the chain.
-        self._wfm_taps = firwin(_WFM_CHANNEL_TAPS, bw / 2, fs=rate).astype(np.float32)
+        cutoff_hz = min(bw / 2, 0.45 * rate)
+        self._wfm_taps = firwin(_WFM_CHANNEL_TAPS, cutoff_hz, fs=rate).astype(np.float32)
         self._wfm_hist = np.zeros(_WFM_CHANNEL_TAPS - 1, np.complex64)
         self._fm_prev = np.complex64(0)
         factor = max(1, round(rate / WFM_AUDIO_RATE))
         self.out_rate = rate / factor
         cutoff = min(WFM_AUDIO_CUTOFF_HZ, 0.47 * self.out_rate)
         self._audio_dec = Decimator(factor, cutoff=cutoff / (rate / 2) * factor, span=16, dtype=np.float32)
-        self._pilot = PilotDetector(rate)
+        # The pilot detector survives bandwidth changes, so a consumer of its state (the RDS
+        # decoder) keeps a valid reference while the mode stays WFM at the same rate.
+        if not keep_pilot:
+            self.pilot = PilotDetector(rate)
         self._deemph_zi = np.zeros(1)
         self.set_deemphasis(self.deemphasis_s)
 
     def set_deemphasis(self, tau_s: float) -> None:
-        """De-emphasis time constant for WFM audio (50 us or 75 us)."""
+        """De-emphasis time constant for WFM audio (50 us or 75 us): a one-pole RC low-pass,
+        H(s) = 1 / (1 + s*tau), by the bilinear transform prewarped at the corner frequency.
+        It runs at the MPX rate, where the warping is negligible across the 15 kHz audio band."""
         self.deemphasis_s = float(tau_s)
-        if self.out_rate > 0:
-            self._deemph_a = math.exp(-1.0 / (self.deemphasis_s * self.out_rate))
+        if self.mpx_rate > 0:
+            w = math.tan(1.0 / (2 * self.deemphasis_s * self.mpx_rate))  # tan(wc*T/2), wc = 1/tau
+            self._deemph_b = np.array([w, w]) / (1 + w)
+            self._deemph_a = np.array([1.0, (w - 1) / (1 + w)])
 
     def process(self, iq: np.ndarray) -> np.ndarray:
         x = np.asarray(iq, np.complex64)
@@ -321,8 +343,8 @@ class Demodulator:
         return np.clip(np.rint(np.asarray(audio) * 32767), -32768, 32767).astype(np.int16)
 
     def _wfm(self, x: np.ndarray) -> np.ndarray:
-        """Channel filter -> discriminator (MPX) -> pilot detection -> 15 kHz low-pass and decimate
-        -> de-emphasis -> DC block. The audio level is set by the deviation, not by AGC."""
+        """Channel filter -> discriminator (MPX) -> pilot detection -> de-emphasis -> 15 kHz low-pass
+        and decimate -> DC block. The audio level is set by the deviation, not by AGC."""
         if x.size == 0:
             self.mpx = np.empty(0, np.float32)
             return np.empty(0, np.int16)
@@ -333,17 +355,16 @@ class Demodulator:
         self._fm_prev = np.complex64(y[-1])
         scale = np.float32(self.mpx_rate / (2 * np.pi * WFM_DEVIATION_HZ))
         self.mpx = np.angle(y * np.conj(prev)).astype(np.float32) * scale
-        self._pilot.process(self.mpx)
-        self.stereo = self._pilot.stereo
-        mono = self._audio_dec.process(self.mpx)
+        self.pilot.process(self.mpx)
+        self.stereo = self.pilot.stereo
+        de, self._deemph_zi = lfilter(self._deemph_b, self._deemph_a, self.mpx, zi=self._deemph_zi)
+        mono = self._audio_dec.process(de)
         if mono.size == 0:
             return np.empty(0, np.int16)
-        a = self._deemph_a
-        de, self._deemph_zi = lfilter([1.0 - a], [1.0, -a], mono, zi=self._deemph_zi)
         if not self._dc_primed:  # a mistuned carrier gives a constant offset: start the blocker there
-            self._dc_zi = lfilter_zi([1.0, -1.0], [1.0, -0.995]) * float(np.mean(de))
+            self._dc_zi = lfilter_zi([1.0, -1.0], [1.0, -0.995]) * float(np.mean(mono))
             self._dc_primed = True
-        audio, self._dc_zi = lfilter([1.0, -1.0], [1.0, -0.995], de, zi=self._dc_zi)
+        audio, self._dc_zi = lfilter([1.0, -1.0], [1.0, -0.995], mono, zi=self._dc_zi)
         return np.clip(np.rint(audio * (WFM_AUDIO_GAIN * 32767)), -32768, 32767).astype(np.int16)
 
     def _fm_detect(self, y: np.ndarray) -> np.ndarray:

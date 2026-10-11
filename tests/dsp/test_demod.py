@@ -301,3 +301,31 @@ def test_wfm_mode_switch_and_back():
     assert d.out_rate == 32_000.0
     d.set_mode("USB")
     assert abs(d.out_rate - 12_000) / 12_000 < 0.1 and d.mpx.size == 0 and not d.stereo
+
+
+@pytest.mark.parametrize("rate", [1.024e6, 2.048e6, 2.4e6])
+@pytest.mark.parametrize("bw", [100_000.0, 150_000.0, 180_000.0, 200_000.0, 250_000.0])
+def test_every_allowed_wfm_bandwidth_works_at_every_rate(rate, bw):
+    d = Demodulator(rate, "WFM", bw_hz=bw)
+    assert d.bw_hz == bw
+    x = wfm_signal(rate, 0.0, tone_mpx(rate, 0.1))
+    assert d.process(x).size > 0
+
+
+def test_wfm_front_decimator_is_flat_to_the_channel_edge():
+    from scipy.signal import freqz
+
+    d = Demodulator(RATE, "WFM")
+    _, h = freqz(d._stages[0].taps, worN=[50e3, 100e3, 110e3], fs=RATE)
+    assert np.all(np.abs(20 * np.log10(np.abs(h))) < 0.1)
+
+
+@pytest.mark.parametrize("tau", [50e-6, 75e-6])
+def test_wfm_deemphasis_at_10_khz(tau):
+    rate, tone, level = 1.024e6, 10_000.0, 0.5
+    x = wfm_signal(rate, 0.0, tone_mpx(rate, 0.5, tone, level))
+    d = Demodulator(rate, "WFM", deemphasis_s=tau)
+    a = d.process(x)
+    a = a[len(a) // 3:]
+    expected = level * 0.5 * 32767 / np.sqrt(1 + (2 * np.pi * tone * tau) ** 2)
+    assert 20 * np.log10(tone_amplitude(a, d.out_rate, tone) / expected) == pytest.approx(0.0, abs=0.2)
