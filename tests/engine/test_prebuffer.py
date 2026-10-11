@@ -90,9 +90,11 @@ def test_session_fills_the_prebuffer_and_keeps_it_after_close():
     s = RadioSession(factory, prebuffer_s=2.0)
     try:
         s.open("synthetic")
-        time.sleep(0.6)
-        snap = s.snapshot_iq()
-        assert snap is not None and 0.3 <= snap.seconds <= 2.0
+        deadline = time.monotonic() + 10.0
+        while (snap := s.snapshot_iq()) is None or snap.seconds < 0.3:  # a loaded machine fills it slowly
+            assert time.monotonic() < deadline, "prebuffer did not fill"
+            time.sleep(0.05)
+        assert 0.3 <= snap.seconds <= 2.0
         assert (snap.center_hz, snap.sample_rate) == (s.state.center_hz, s.state.sample_rate)
         gen, center, rate = s.current_generation
         assert (snap.gen, center, rate) == (gen, s.state.center_hz, s.state.sample_rate)
@@ -105,11 +107,14 @@ def test_session_retune_clears_the_prebuffer():
     s = RadioSession(factory, prebuffer_s=5.0)
     try:
         s.open("synthetic")
-        time.sleep(0.6)
+        deadline = time.monotonic() + 10.0
+        while (snap := s.snapshot_iq()) is None or snap.seconds < 0.3:
+            assert time.monotonic() < deadline, "prebuffer did not fill"
+            time.sleep(0.05)
         retuned = time.monotonic()  # taken before update(): samples are kept from inside it too
         s.update(StatePatch(center_hz=8_000_000.0))
         snap = s.snapshot_iq()
-        while snap.center_hz != 8_000_000.0 and time.monotonic() - retuned < 3.0:
+        while snap.center_hz != 8_000_000.0 and time.monotonic() - retuned < 10.0:
             time.sleep(0.05)  # the first blocks after a retune can take a moment to render
             snap = s.snapshot_iq()
         assert snap.center_hz == 8_000_000.0

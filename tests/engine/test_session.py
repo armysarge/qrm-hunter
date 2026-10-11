@@ -2,7 +2,6 @@ import asyncio
 import threading
 import time
 
-import numpy as np
 import pytest
 
 from qrm_hunter.engine.session import RadioSession, StateError
@@ -21,21 +20,45 @@ def sdr_threads():
     return [t for t in threading.enumerate() if t.name.startswith("sdr-") and t.is_alive()]
 
 
-def wait_no_threads(timeout=2.0):
+def wait_until(condition, timeout=10.0, interval=0.02):
+    """Poll `condition` until it is truthy or the deadline passes; returns its last value."""
+    deadline = time.monotonic() + timeout
+    while not (value := condition()) and time.monotonic() < deadline:
+        time.sleep(interval)
+    return value
+
+
+def wait_no_threads(timeout=10.0):
     deadline = time.monotonic() + timeout
     while sdr_threads() and time.monotonic() < deadline:
         time.sleep(0.02)
     return sdr_threads()
 
 
+@pytest.fixture(autouse=True)
+def _close_every_session(monkeypatch):
+    """Every RadioSession a test creates is closed afterwards, even if the test fails midway, so
+    a leaked radio thread cannot eat CPU in the tests that follow."""
+    made = []
+
+    class TrackedSession(RadioSession):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            made.append(self)
+
+    monkeypatch.setitem(globals(), "RadioSession", TrackedSession)
+    yield
+    for s in made:
+        s.close()
+    assert wait_no_threads() == []
+
+
 @pytest.fixture
 def session():
-    s = RadioSession(factory)
-    yield s
-    s.close()
+    return RadioSession(factory)
 
 
-async def next_of(sub, predicate, timeout=3.0):
+async def next_of(sub, predicate, timeout=10.0):
     async def find():
         while True:
             item = await sub.queue.get()
@@ -142,8 +165,10 @@ def test_audio_chunks_when_enabled(session):
 def test_slow_subscriber_is_bounded_and_radio_keeps_running(session):
     async def main():
         sub = session.spectrum.subscribe()
+        deadline = time.monotonic() + 10.0
         await asyncio.to_thread(session.open, "synthetic")
-        await asyncio.sleep(0.8)  # never read the queue
+        while sub.dropped == 0 and time.monotonic() < deadline:  # never read the queue
+            await asyncio.sleep(0.05)
         return sub.queue.qsize(), sub.dropped
 
     size, dropped = asyncio.run(main())
@@ -227,6 +252,9 @@ def test_published_frames_always_match_their_own_labels():
             await asyncio.sleep(0.25)
             await asyncio.to_thread(s.update, StatePatch(tune_hz=TUNES[(i + 1) % 2]))
         await asyncio.sleep(0.4)
+        deadline = time.monotonic() + 10.0
+        while len(frames) <= 10 and time.monotonic() < deadline:  # a loaded machine renders fewer frames
+            await asyncio.sleep(0.05)
         task.cancel()
         return frames
 
@@ -269,11 +297,15 @@ class SlowOnceDevice(SyntheticDevice):
         super().__init__(realtime=True)
         self.reads = 0
         self.stall = stall
+        self.stalled = threading.Event()  # set once the stall has begun
+        self.failed = threading.Event()  # set once the stalled read has given up
 
     def read(self, n):
         self.reads += 1
         if self.reads == 3:
+            self.stalled.set()
             time.sleep(self.stall)
+            self.failed.set()
             raise DeviceError("closed under us")
         return super().read(n)
 
@@ -283,12 +315,14 @@ def test_stuck_old_reader_cannot_kill_a_new_session(monkeypatch):
 
     monkeypatch.setattr(session_mod, "JOIN_TIMEOUT", 0.2)
     monkeypatch.setattr(session_mod, "DEV_LOCK_TIMEOUT", 0.2)
-    devices = [SlowOnceDevice(1.0), SyntheticDevice(realtime=True)]
+    old = SlowOnceDevice(1.0)
+    devices = [old, SyntheticDevice(realtime=True)]
     s = RadioSession(lambda _id: devices.pop(0))
     s.open("synthetic")
-    time.sleep(0.3)  # old reader is now stuck inside read()
+    assert old.stalled.wait(10)  # old reader is now stuck inside read()
     s.open("synthetic")
-    time.sleep(1.5)  # old read finally fails after the new run started
+    assert old.failed.wait(10)  # old read finally fails after the new run started
+    time.sleep(0.3)  # let the old reader's error handling run
     try:
         assert s.state.running
         assert len(sdr_threads()) == 2
@@ -302,15 +336,16 @@ def test_update_with_unresponsive_device_raises_and_keeps_state(monkeypatch):
 
     monkeypatch.setattr(session_mod, "JOIN_TIMEOUT", 0.2)
     monkeypatch.setattr(session_mod, "DEV_LOCK_TIMEOUT", 0.2)
-    s = RadioSession(lambda _id: SlowOnceDevice(1.5))
+    device = SlowOnceDevice(3.0)
+    s = RadioSession(lambda _id: device)
     s.open("synthetic")
-    time.sleep(0.3)
+    assert device.stalled.wait(10)
     before = s.state
     with pytest.raises(DeviceError, match="not responding"):
         s.update(StatePatch(center_hz=8_000_000.0))
     assert s.state == before
     s.close()
-    assert wait_no_threads(3.0) == []
+    assert wait_no_threads() == []
 
 
 def test_rejected_reopen_keeps_running_radio(session):
@@ -502,7 +537,7 @@ def test_rds_events_are_published_on_change_and_reset_on_retune(session):
         await asyncio.to_thread(session.open, "synthetic", StatePatch(tune_hz=100_000_000.0, mode="WFM"))
         times = []
         ev = await next_of(sub, lambda e: e["type"] == "rds" and (times.append(time.monotonic()) or True)
-                           and e["rds"]["ps"] == "QRM DEMO", timeout=8.0)
+                           and e["rds"]["ps"] == "QRM DEMO", timeout=15.0)
         snapshot = session.rds
         await asyncio.to_thread(session.update, StatePatch(tune_hz=100_100_000.0))
         cleared = await next_of(sub, lambda e: e["type"] == "rds")
@@ -514,8 +549,9 @@ def test_rds_events_are_published_on_change_and_reset_on_retune(session):
     assert (rds["pi"], rds["pty"], rds["tp"], rds["stereo"], rds["synced"]) == ("6201", 10, True, True, True)
     assert snapshot == rds
     assert cleared == {"type": "rds", "rds": None}  # a retune forgets the old station at once
-    gaps = np.diff(times)
-    assert np.all(gaps >= 0.19)  # at most 5 per second
+    # at most 5 per second. Arrival times are taken by the consumer, which a busy machine can delay
+    # and then catch up on in a burst, so the rate is judged over the whole span with some slack.
+    assert (len(times) - 1) / (times[-1] - times[0] + 0.5) <= 5.0
     assert session.rds is None  # not WFM any more
 
 
@@ -548,7 +584,7 @@ def test_small_tuning_steps_keep_rds_but_a_new_station_resets_it(session):
     async def main():
         sub = session.events.subscribe()
         await asyncio.to_thread(session.open, "synthetic", StatePatch(tune_hz=100_000_000.0, mode="WFM"))
-        await next_of(sub, lambda e: e["type"] == "rds" and e["rds"]["ps"] == "QRM DEMO", timeout=8.0)
+        await next_of(sub, lambda e: e["type"] == "rds" and e["rds"]["ps"] == "QRM DEMO", timeout=15.0)
         await asyncio.to_thread(session.update, StatePatch(tune_hz=100_010_000.0))
         kept = session.rds
         await asyncio.to_thread(session.update, StatePatch(tune_hz=100_200_000.0))

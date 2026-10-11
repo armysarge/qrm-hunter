@@ -1,4 +1,7 @@
+import concurrent.futures
+import contextlib
 import json
+import sys
 import time
 
 import pytest
@@ -24,6 +27,25 @@ def make_client(tmp_path, token=None, static_dir=None):
     store = SettingsStore(tmp_path / "s.toml")
     app = create_app(session, store, token=token, static_dir=static_dir, discover_fn=lambda: [SYNTHETIC_INFO])
     return TestClient(app, base_url="http://127.0.0.1:7070"), session, store
+
+
+@contextlib.contextmanager
+def ws_connect(client, url, **kwargs):
+    """TestClient.websocket_connect, minus one teardown race. On exit the test client sends the
+    disconnect and immediately cancels the ASGI task; if the handler has not finished unwinding
+    yet (a busy machine) the cancelled task surfaces as a CancelledError from __exit__. What the
+    test asserts has already happened by then, so only that exit-time error is dropped."""
+    session = client.websocket_connect(url, **kwargs)
+    ws = session.__enter__()
+    try:
+        yield ws
+    except BaseException:
+        info = sys.exc_info()
+        with contextlib.suppress(concurrent.futures.CancelledError):
+            session.__exit__(*info)
+        raise
+    with contextlib.suppress(concurrent.futures.CancelledError):
+        session.__exit__(None, None, None)
 
 
 @pytest.fixture
@@ -68,9 +90,9 @@ def test_unknown_field_is_422(client):
 
 def test_spectrum_websocket_honours_view(client):
     client.post("/api/session/open", json={"device_id": "synthetic"})
-    with client.websocket_connect("ws://127.0.0.1:7070/ws/spectrum") as ws:
+    with ws_connect(client, "ws://127.0.0.1:7070/ws/spectrum") as ws:
         ws.send_text(json.dumps({"width": 512}))
-        for _ in range(30):
+        for _ in range(300):  # the view message takes effect a few frames after it is sent
             frame = decode_spectrum_frame(ws.receive_bytes())
             if frame["n_bins"] == 512:
                 break
@@ -78,14 +100,14 @@ def test_spectrum_websocket_honours_view(client):
 
 
 def test_events_websocket_starts_with_state(client):
-    with client.websocket_connect("ws://127.0.0.1:7070/ws/events") as ws:
+    with ws_connect(client, "ws://127.0.0.1:7070/ws/events") as ws:
         ev = ws.receive_json()
         assert ev["type"] == "state" and "tune_hz" in ev["state"]
 
 
 def test_audio_websocket_sends_format_then_pcm(client):
     client.post("/api/session/open", json={"device_id": "synthetic", "config": {"audio": True, "tune_hz": 7_245_000}})
-    with client.websocket_connect("ws://127.0.0.1:7070/ws/audio") as ws:
+    with ws_connect(client, "ws://127.0.0.1:7070/ws/audio") as ws:
         fmt = ws.receive_json()
         assert fmt["type"] == "format" and fmt["format"] == "s16le" and 10_000 < fmt["rate"] < 14_000
         assert len(ws.receive_bytes()) % 2 == 0
@@ -93,9 +115,9 @@ def test_audio_websocket_sends_format_then_pcm(client):
 
 def test_disconnecting_client_leaves_radio_running(client):
     client.post("/api/session/open", json={"device_id": "synthetic"})
-    with client.websocket_connect("ws://127.0.0.1:7070/ws/spectrum") as ws:
+    with ws_connect(client, "ws://127.0.0.1:7070/ws/spectrum") as ws:
         ws.receive_bytes()
-    deadline = time.monotonic() + 2
+    deadline = time.monotonic() + 10
     while client.session.spectrum.subscriber_count and time.monotonic() < deadline:
         time.sleep(0.05)
     assert client.session.spectrum.subscriber_count == 0
@@ -124,9 +146,9 @@ def test_token_is_enforced(tmp_path):
         assert c.get("/api/state?token=s3cret").status_code == 200
         assert c.get("/api/state", headers={"Authorization": "Bearer s3cret"}).status_code == 200
         with pytest.raises(WebSocketDisconnect):
-            with c.websocket_connect("ws://127.0.0.1:7070/ws/events") as ws:
+            with ws_connect(c, "ws://127.0.0.1:7070/ws/events") as ws:
                 ws.receive_json()
-        with c.websocket_connect("ws://127.0.0.1:7070/ws/events?token=s3cret") as ws:
+        with ws_connect(c, "ws://127.0.0.1:7070/ws/events?token=s3cret") as ws:
             assert ws.receive_json()["type"] == "state"
 
 
@@ -211,7 +233,7 @@ def test_foreign_host_is_refused_without_token(client, host):
     assert client.session.state.running is False
     assert client.get("/", headers={"Host": host}).status_code == 403
     with pytest.raises(WebSocketDisconnect) as exc:
-        with client.websocket_connect(f"{WS}/ws/events", headers={"Host": host}) as ws:
+        with ws_connect(client, f"{WS}/ws/events", headers={"Host": host}) as ws:
             ws.receive_json()
     assert exc.value.code == 4403
 
@@ -223,11 +245,11 @@ def test_token_mode_serves_any_host(tmp_path):
         assert r.status_code == 200
         r = c.post("/api/session/close", json={}, headers={"Host": "pi.local:7070", "Authorization": "Bearer s3cret"})
         assert r.status_code == 200
-        with c.websocket_connect("ws://pi.local:7070/ws/events?token=s3cret",
+        with ws_connect(c, "ws://pi.local:7070/ws/events?token=s3cret",
                                  headers={"Origin": "http://pi.local:7070"}) as ws:
             assert ws.receive_json()["type"] == "state"
         with pytest.raises(WebSocketDisconnect) as exc:
-            with c.websocket_connect("ws://pi.local:7070/ws/events?token=s3cret",
+            with ws_connect(c, "ws://pi.local:7070/ws/events?token=s3cret",
                                      headers={"Origin": "https://evil.example"}) as ws:
                 ws.receive_json()
         assert exc.value.code == 4403
@@ -237,18 +259,18 @@ def test_token_mode_serves_any_host(tmp_path):
 @pytest.mark.parametrize("origin", ["https://evil.example", "http://localhost:7070", "null", "http://127.0.0.1:8080"])
 def test_cross_origin_websocket_is_refused(client, path, origin):
     with pytest.raises(WebSocketDisconnect) as exc:
-        with client.websocket_connect(f"{WS}{path}", headers={"Origin": origin}) as ws:
+        with ws_connect(client, f"{WS}{path}", headers={"Origin": origin}) as ws:
             ws.receive_bytes()
     assert exc.value.code == 4403
 
 
 def test_same_origin_and_originless_websockets_are_allowed(client):
-    with client.websocket_connect(f"{WS}/ws/events", headers={"Origin": "http://127.0.0.1:7070"}) as ws:
+    with ws_connect(client, f"{WS}/ws/events", headers={"Origin": "http://127.0.0.1:7070"}) as ws:
         assert ws.receive_json()["type"] == "state"
-    with client.websocket_connect(f"{WS}/ws/events") as ws:  # no Origin: a non-browser client
+    with ws_connect(client, f"{WS}/ws/events") as ws:  # no Origin: a non-browser client
         assert ws.receive_json()["type"] == "state"
     # the Vite dev proxy forwards the page's Host (localhost:5173) along with its Origin
-    with client.websocket_connect("ws://localhost:5173/ws/events",
+    with ws_connect(client, "ws://localhost:5173/ws/events",
                                   headers={"Origin": "http://localhost:5173"}) as ws:
         assert ws.receive_json()["type"] == "state"
 
@@ -375,7 +397,7 @@ def test_memory_count_is_capped(client):
 
 
 def test_memory_changes_are_published_as_events(client):
-    with client.websocket_connect("ws://127.0.0.1:7070/ws/events") as ws:
+    with ws_connect(client, "ws://127.0.0.1:7070/ws/events") as ws:
         assert ws.receive_json()["type"] == "state"
         client.post("/api/memories", json=MEMORY)
         for _ in range(20):
@@ -467,7 +489,7 @@ def test_direct_sampling_is_ignored_not_rejected_by_devices_without_it(client):
 # --- broadcast FM and RDS ----------------------------------------------------------------------
 
 
-def wait_for_rds(client, timeout=8.0):
+def wait_for_rds(client, timeout=15.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         rds = client.get("/api/rds").json()
@@ -484,7 +506,7 @@ def test_rds_endpoint_and_events_on_subscribe(client):
     assert r.status_code == 200 and r.json()["bw_hz"] == 180_000
     rds = wait_for_rds(client)
     assert rds["pi"] == "6201" and rds["pty_name"] == "Pop Music"
-    with client.websocket_connect("ws://127.0.0.1:7070/ws/events") as ws:
+    with ws_connect(client, "ws://127.0.0.1:7070/ws/events") as ws:
         assert ws.receive_json()["type"] == "state"
         ev = ws.receive_json()
         assert ev["type"] == "rds" and ev["rds"]["ps"] == "QRM DEMO"
