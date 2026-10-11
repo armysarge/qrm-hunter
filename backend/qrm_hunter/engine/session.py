@@ -26,6 +26,7 @@ RING_SECONDS = 0.5
 JOIN_TIMEOUT = 2.0  # seconds to wait for a run's threads on close
 DEV_LOCK_TIMEOUT = 3.0  # seconds to wait for an in-progress device read/configure
 RDS_MIN_INTERVAL = 0.2  # seconds between published RDS updates (at most 5 per second)
+RDS_RETUNE_HZ = 50_000.0  # a retune further than this starts RDS decoding afresh
 
 
 class StateError(ValueError):
@@ -240,8 +241,8 @@ class RadioSession:
                         self._gen += 1
                 self._apply_dsp(old, new, plan)
             self._state = new
-            if (new.mode, new.tune_hz, new.sample_rate) != (old.mode, old.tune_hz, old.sample_rate):
-                self._reset_rds()  # another station or mode: start decoding afresh
+            if self._rds_stale(old, new):
+                self._reset_rds()
         self._publish_state()
         return self.state
 
@@ -339,13 +340,20 @@ class RadioSession:
     def _publish_state(self) -> None:
         self.events.publish({"type": "state", "state": self.state.model_dump()})
 
+    @staticmethod
+    def _rds_stale(old: RadioState, new: RadioState) -> bool:
+        """Another station, mode, rate or span: decoded RDS no longer applies. Tuning steps of up to
+        RDS_RETUNE_HZ (a wheel or arrow step across the same station) keep it."""
+        return ((new.mode, new.sample_rate, new.center_hz) != (old.mode, old.sample_rate, old.center_hz)
+                or abs(new.tune_hz - old.tune_hz) > RDS_RETUNE_HZ)
+
     def _reset_rds(self) -> None:
         """Call with the lock held. A fresh RDS decoder while running in WFM, otherwise none; the
         published RDS state is forgotten (and its absence announced). Under the lock, so a DSP
         thread update from the old decoder cannot arrive after the announcement."""
         demod = self._demod
         if self._state.running and self._state.mode == "WFM" and demod is not None and demod.mode == "WFM":
-            self._rds = RdsDecoder(demod.mpx_rate, self._region)
+            self._rds = RdsDecoder(demod.mpx_rate, self._region, pilot=demod.pilot)
         else:
             self._rds = None
         if self._rds_snapshot is not None:

@@ -78,7 +78,7 @@ _SYNDROME_TO_OFFSET = {s: name for name, s in SYNDROMES.items()}
 
 # --- character set and programme types ------------------------------------------------------------
 
-# IEC 62106 Annex E, 0x80-0xFF. 0x20-0x7E are taken as ASCII.
+# IEC 62106 Annex E, 0x80-0xFF. 0x20-0x7E is ASCII apart from the four codes patched below.
 _HIGH = (
     "áàéèíìóòúùÑÇŞß¡Ĳ"
     "âäêëîïôöûüñçşğıĳ"
@@ -91,6 +91,8 @@ _HIGH = (
 )
 assert len(_HIGH) == 128
 CHARSET = {**{c: chr(c) for c in range(0x20, 0x7F)}, **{0x80 + i: ch for i, ch in enumerate(_HIGH)}}
+# Where the RDS table differs from ASCII ('$' lives at 0xAB):
+CHARSET.update({0x24: "¤", 0x5E: "―", 0x60: "‖", 0x7E: "¯"})
 
 
 def decode_chars(codes) -> str:
@@ -158,15 +160,18 @@ LOSS_ERRORS = 25  # bad blocks within the window that drop sync
 class BlockSync:
     """Finds block boundaries in the bit stream and assembles groups.
 
-    push() returns a completed group as a 4-tuple of 16-bit information words (None for a block
-    that failed its check), or None.
+    While searching, every bit position modulo 26 keeps its own candidate run, so a random
+    syndrome match at another phase cannot reset an acquisition that is under way. push()
+    returns a completed group as a 4-tuple of 16-bit information words (None for a block that
+    failed its check), or None.
     """
 
     def __init__(self) -> None:
         self.synced = False
         self._reg = 0
         self._nbits = 0
-        self._cand: tuple[int, int, int] | None = None  # (bit position, block index, run length)
+        # per bit phase: (bit position, block index, run length, partial group)
+        self._cands: list[tuple[int, int, int, list] | None] = [None] * 26
         self._block_bits = 0
         self._expect = 0
         self._group: list[int | None] = [None] * 4
@@ -190,12 +195,22 @@ class BlockSync:
         idx = self._expect
         self._expect = (idx + 1) % 4
         name = _SYNDROME_TO_OFFSET.get(syndrome(self._reg))
-        ok = name is not None and _BLOCK_INDEX[name] == idx
+        ok = name is not None and _BLOCK_INDEX[name] == idx and self._third_ok(name, self._group)
         self.window.append(not ok)
-        group = self._store(idx, self._reg >> 10 if ok else None)
+        group = self._store(self._group, idx, self._reg >> 10 if ok else None)
         if sum(self.window) >= LOSS_ERRORS:
             self._lose()
         return group
+
+    @staticmethod
+    def _third_ok(name: str, group: list) -> bool:
+        """Block 3 carries offset C' only in version B groups (bit 11 of block B), C otherwise.
+        With block B unreadable, only C is accepted."""
+        if name not in ("C", "C'"):
+            return True
+        b = group[1]
+        version_b = b is not None and bool(b >> 11 & 1)
+        return (name == "C'") == version_b
 
     def _search(self) -> tuple | None:
         if self._nbits < 26:
@@ -204,33 +219,39 @@ class BlockSync:
         if name is None:
             return None
         idx = _BLOCK_INDEX[name]
-        run = 1
-        if self._cand is not None:
-            pos, prev, prev_run = self._cand
-            if self._nbits - pos == 26 and idx == (prev + 1) % 4:
-                run = prev_run + 1
-        if run == 1:
-            self._group = [None] * 4
-        self._cand = (self._nbits, idx, run)
-        group = self._store(idx, self._reg >> 10)
+        phase = self._nbits % 26
+        cand = self._cands[phase]
+        if cand is not None and self._nbits - cand[0] == 26 and idx == (cand[1] + 1) % 4 \
+                and self._third_ok(name, cand[3]):
+            run, group = cand[2] + 1, cand[3]
+        else:
+            run, group = 1, [None] * 4
+        info = self._reg >> 10
+        done = self._store(group, idx, info)
+        if done is not None:
+            group = [None] * 4
+        self._cands[phase] = (self._nbits, idx, run, group)
         if run >= SYNC_BLOCKS:
             self.synced = True
             self._block_bits = 0
             self._expect = (idx + 1) % 4
+            self._group = group
+            self._cands = [None] * 26
             self.window.clear()
-        return group
+            return done
+        return None
 
-    def _store(self, idx: int, info: int | None) -> tuple | None:
-        self._group[idx] = info
+    def _store(self, group: list, idx: int, info: int | None) -> tuple | None:
+        group[idx] = info
         if idx != 3:
             return None
-        group = tuple(self._group)
-        self._group = [None] * 4
-        return group
+        done = tuple(group)
+        group[:] = [None] * 4
+        return done
 
     def _lose(self) -> None:
         self.synced = False
-        self._cand = None
+        self._cands = [None] * 26
         self._group = [None] * 4
         self.window.clear()
 
@@ -254,6 +275,10 @@ class GroupDecoder:
         self._rtplus_group: int | None = None
         self._rtplus_toggle: int | None = None
         self._tags: dict[int, tuple[int, int]] = {}
+        # True while the tags belong to an RT+ item announced after the last RadioText change,
+        # i.e. to the text that is about to start, so the coming A/B toggle must keep them.
+        self._tags_new_item = False
+        self._last_pi: int | None = None
 
     def set(self, **fields) -> None:
         for k, v in fields.items():
@@ -269,14 +294,14 @@ class GroupDecoder:
     def decode(self, group: tuple) -> None:
         a, b, c, d = group
         if a is not None:
-            self.set(pi=f"{a:04X}")
+            self._pi(a)
         if b is None:
             return
         gtype, version = b >> 12, (b >> 11) & 1
         pty = (b >> 5) & 31
         self.set(tp=bool(b >> 10 & 1), pty=pty, pty_name=pty_name(pty, self.region))
         if version == 1 and c is not None:  # block C' repeats the PI code
-            self.set(pi=f"{c:04X}")
+            self._pi(c)
         if gtype == 0:
             self._group0(b, d)
         elif gtype == 2:
@@ -287,6 +312,12 @@ class GroupDecoder:
             self._group4a(b, c, d)
         if self._rtplus_group is not None and (gtype << 1 | version) == self._rtplus_group:
             self._rtplus(b, c, d)
+
+    def _pi(self, pi: int) -> None:
+        """Publish a PI code once it has been read the same twice in a row."""
+        if pi == self._last_pi:
+            self.set(pi=f"{pi:04X}")
+        self._last_pi = pi
 
     def _group0(self, b: int, d: int | None) -> None:
         self.set(ta=bool(b >> 4 & 1), ms=bool(b >> 3 & 1))
@@ -306,10 +337,13 @@ class GroupDecoder:
     def _group2(self, version: int, b: int, c: int | None, d: int | None) -> None:
         ab, seg = (b >> 4) & 1, b & 0xF
         if ab != self._rt_ab or version != self._rt_version:
-            # A new text: start again, and drop the RT+ tags that pointed into the old one.
+            # A new text: start again, and drop the RT+ tags that pointed into the old one
+            # (tags for a new item, sent just before its text, are kept).
             self._rt = [None] * (64 if version == 0 else 32)
             self._rt_ab, self._rt_version, self._rt_end = ab, version, None
-            self._tags.clear()
+            if not self._tags_new_item:
+                self._tags.clear()
+            self._tags_new_item = False
             self._update_rtplus()
         if version == 0:
             if c is None or d is None:
@@ -351,10 +385,15 @@ class GroupDecoder:
     def _rtplus(self, b: int, c: int | None, d: int | None) -> None:
         if c is None or d is None:
             return
-        toggle = (b >> 4) & 1
+        toggle, running = (b >> 4) & 1, (b >> 3) & 1
         if toggle != self._rtplus_toggle:  # a new item: forget the old tags
             self._rtplus_toggle = toggle
             self._tags.clear()
+            self._tags_new_item = True
+        if not running:  # no item on air (e.g. between programme items): nothing to show
+            self._tags.clear()
+            self._update_rtplus()
+            return
         tags = (
             (((b & 7) << 3) | (c >> 13), (c >> 7) & 0x3F, (c >> 1) & 0x3F),
             (((c & 1) << 5) | (d >> 11), (d >> 5) & 0x3F, d & 0x1F),
@@ -400,9 +439,12 @@ class RdsDecoder:
     LOWPASS_HZ = 2400.0
     BASE_RATE = 19_000.0  # about 16 samples per bit after decimation
 
-    def __init__(self, rate: float, region: int = 1) -> None:
+    def __init__(self, rate: float, region: int = 1, pilot: PilotDetector | None = None) -> None:
+        """`pilot`: the demodulator's pilot detector, already fed with the same MPX. Without one,
+        the decoder runs its own (for use on a bare MPX signal)."""
         self.rate = float(rate)
-        self.pilot = PilotDetector(self.rate)
+        self._own_pilot = pilot is None
+        self.pilot = PilotDetector(self.rate) if pilot is None else pilot
         self._factors = choose_decimation(self.rate, self.BASE_RATE)
         self.base_rate = self.rate / math.prod(self._factors)
         sps = self.base_rate / BITRATE
@@ -431,7 +473,8 @@ class RdsDecoder:
     def reset(self) -> None:
         region = self._groups.region
         self._groups = GroupDecoder(region)
-        self.pilot.reset()
+        if self._own_pilot:
+            self.pilot.reset()
         self._stages = [Decimator(f) for f in self._factors]
         self._mixer = Mixer(SUBCARRIER_HZ, self.rate)
         self._lp_zi = np.zeros(self._lp.size - 1, np.complex64)
@@ -454,7 +497,8 @@ class RdsDecoder:
         x = np.asarray(mpx, np.float32)
         if x.size == 0:
             return
-        self.pilot.process(x)
+        if self._own_pilot:
+            self.pilot.process(x)
         # With a pilot, the subcarrier is locked to 3x its frequency: steer the carrier loop by
         # the measured pilot error and leave the loop only the phase. Without one, the loop
         # tracks the free-running subcarrier by itself.

@@ -542,3 +542,18 @@ def test_region_sets_wfm_deemphasis_and_rds_pty_table(session):
     assert session._demod.deemphasis_s == 75e-6
     session.set_region(1)
     assert session._demod.deemphasis_s == 50e-6
+
+
+def test_small_tuning_steps_keep_rds_but_a_new_station_resets_it(session):
+    async def main():
+        sub = session.events.subscribe()
+        await asyncio.to_thread(session.open, "synthetic", StatePatch(tune_hz=100_000_000.0, mode="WFM"))
+        await next_of(sub, lambda e: e["type"] == "rds" and e["rds"]["ps"] == "QRM DEMO", timeout=8.0)
+        await asyncio.to_thread(session.update, StatePatch(tune_hz=100_010_000.0))
+        kept = session.rds
+        await asyncio.to_thread(session.update, StatePatch(tune_hz=100_200_000.0))
+        return kept, session.rds
+
+    kept, after = asyncio.run(main())
+    assert kept is not None and kept["ps"] == "QRM DEMO"
+    assert after is None or after["ps"] is None

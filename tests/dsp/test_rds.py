@@ -209,6 +209,8 @@ def test_changed_flag():
     dec = GroupDecoder()
     dec.decode(tuple(ps_groups()[0]))
     assert dec.changed
+    dec.decode(tuple(ps_groups()[0]))  # second matching block A: the PI is published
+    assert dec.state.pi == "6201"
     dec.changed = False
     dec.decode(tuple(ps_groups()[0]))
     assert not dec.changed  # nothing new
@@ -219,7 +221,7 @@ def test_changed_flag():
 
 def test_decoder_round_trip_from_mpx_with_irregular_blocks():
     rate = 256_000.0
-    st = DemoStation(ta_period_s=2.0, ta_on_s=1.0)
+    st = DemoStation(ta_period_s=2.0, ta_on_s=1.0, clock_start=datetime(2026, 10, 10, 9, 59, 58, tzinfo=UTC))
     mpx = st.mpx(0, int(rate * 4.0), rate)
     mpx += 0.05 * np.random.default_rng(0).standard_normal(mpx.size).astype(np.float32)
     dec = RdsDecoder(rate)
@@ -257,3 +259,112 @@ def test_noise_alone_never_syncs():
     for i in range(0, x.size, 8192):
         dec.process(x[i:i + 8192])
     assert dec.state.pi is None and dec.state.ps is None and not dec.state.stereo
+
+
+# --- review fixes ------------------------------------------------------------------------------
+
+
+def bits_of(block):
+    return [(block >> (25 - i)) & 1 for i in range(26)]
+
+
+def test_a_random_syndrome_hit_at_another_bit_phase_does_not_reset_acquisition():
+    rng = random.Random(7)
+    a = encode_block(PI, "A")
+    while True:  # find a block B such that some window straddling A|B also passes a syndrome check
+        b = encode_block(rng.getrandbits(16), "B")
+        joined = (a << 26) | b
+        if any(syndrome((joined >> (26 - j)) & 0x3FFFFFF) in SYNDROMES.values() for j in range(1, 26)):
+            break
+    sync = BlockSync()
+    for bit in bits_of(a) + bits_of(b):
+        sync.push(bit)
+    assert sync.synced
+
+
+def test_c_prime_is_accepted_only_in_version_b_groups():
+    sync = BlockSync()
+    for bit in stream(ps_groups() * 2):
+        sync.push(bit)
+    assert sync.synced
+    b_version_a = group_0a(PI, PTY, True, False, True, 0, "QRM DEMO")[1]
+    groups = []
+    for blk in (encode_block(PI, "A"), encode_block(b_version_a, "B"), encode_block(PI, "C'"),
+                encode_block(0x5152, "D")):
+        groups += [g for g in (sync.push(bit) for bit in bits_of(blk)) if g is not None]
+    assert groups == [(PI, b_version_a, None, 0x5152)]  # C' in a version A group is an error
+    b_version_b = group_0a(PI, PTY, True, False, True, 0, "QRM DEMO", version=1)[1]
+    groups = []
+    for blk in (encode_block(PI, "A"), encode_block(b_version_b, "B"), encode_block(PI, "C'"),
+                encode_block(0x5152, "D")):
+        groups += [g for g in (sync.push(bit) for bit in bits_of(blk)) if g is not None]
+    assert groups == [(PI, b_version_b, PI, 0x5152)]
+
+
+def test_pi_needs_two_matching_readings():
+    dec = GroupDecoder()
+    dec.decode((0x1234, None, None, None))
+    assert dec.state.pi is None
+    dec.decode((0x6201, None, None, None))
+    assert dec.state.pi is None  # a different code does not confirm the first
+    dec.decode((0x6201, None, None, None))
+    assert dec.state.pi == "6201"
+
+
+TEXT = "Now playing: ZS6SHZ - Noise Floor Blues"
+APP = (11 << 1) | 0
+
+
+def test_rtplus_item_not_running_clears_the_tags():
+    dec = decode_all(rt_groups(TEXT) + [group_3a(PI, PTY, True, APP),
+                                        group_rtplus(PI, PTY, True, APP, 0, True, [(1, 22, 17), (4, 13, 6)])])
+    assert dec.state.rtplus is not None
+    decode_all([group_rtplus(PI, PTY, True, APP, 0, False, [(1, 22, 17), (4, 13, 6)])], dec=dec)
+    assert dec.state.rtplus is None
+
+
+def test_rtplus_tags_for_a_new_item_survive_the_radiotext_toggle_that_follows():
+    dec = decode_all(rt_groups(TEXT) + [group_3a(PI, PTY, True, APP),
+                                        group_rtplus(PI, PTY, True, APP, 0, True, [(1, 22, 17), (4, 13, 6)])])
+    nxt = "Up next: Static - Hum"  # artist "Static" at 9, title "Hum" at 18
+    decode_all([group_rtplus(PI, PTY, True, APP, 1, True, [(4, 9, 6), (1, 18, 3)])], dec=dec)
+    decode_all(rt_groups(nxt, ab=1), dec=dec)
+    assert dec.state.rt == nxt
+    assert dec.state.rtplus == {"title": "Hum", "artist": "Static"}
+
+
+def test_rds_specific_characters():
+    assert decode_chars([0x24, 0x5E, 0x60, 0x7E, 0xAB]) == "¤―‖¯$"
+    assert encode_text("$") == [0xAB]
+
+
+# Golden groups, assembled by hand from IEC 62106 (information words; check words not involved).
+
+
+def test_golden_4a_clock_time():
+    # 2026-10-10 is MJD 61323 = 0b1_1101_1111_0001_011 (bits 16..15 = 01, bits 14..0 = 0x6F8B).
+    # 12:34 UTC, local offset +4 half hours (+02:00).
+    # B = 0100 0 1 01010 000 01 = 0x4541  (4A, TP, PTY 10, MJD bits 16..15)
+    # C = 0x6F8B << 1 | hour bit 4 (0) = 0xDF16
+    # D = hour 1100 | minute 100010 | sign 0 | 00100 = 0xC884
+    dec = GroupDecoder()
+    dec.decode((0x6201, 0x4541, 0xDF16, 0xC884))
+    assert dec.state.ct == "2026-10-10T14:34:00+02:00"
+    assert (dec.state.pty, dec.state.tp) == (10, True)
+
+
+def test_golden_rtplus_11a():
+    # 3A: B = 0011 0 1 01010 10110 = 0x3556 (application group 11A), C = 0, D = AID 0x4BD7.
+    # 11A: B = 1011 0 1 01010 0 1 000 = 0xB548 (toggle 0, running 1, type 1 bits 5..3 = 000)
+    #      C = 001 010110 010000 0 = 0x2B20 (type 1 = ITEM.TITLE, start 22, length 16+1, type 2 bit 5 = 0)
+    #      D = 00100 001101 00101 = 0x21A5 (type 2 = ITEM.ARTIST, start 13, length 5+1)
+    text = [ord(ch) for ch in TEXT] + [0x0D]
+    text += [0x20] * (-len(text) % 4)
+    dec = GroupDecoder()
+    for seg in range(len(text) // 4):  # 2A: B = 0010 0 1 01010 0 ssss
+        c0, c1, d0, d1 = text[4 * seg:4 * seg + 4]
+        dec.decode((0x6201, 0x2540 | seg, (c0 << 8) | c1, (d0 << 8) | d1))
+    assert dec.state.rt == TEXT
+    dec.decode((0x6201, 0x3556, 0x0000, 0x4BD7))
+    dec.decode((0x6201, 0xB548, 0x2B20, 0x21A5))
+    assert dec.state.rtplus == {"title": "Noise Floor Blues", "artist": "ZS6SHZ"}

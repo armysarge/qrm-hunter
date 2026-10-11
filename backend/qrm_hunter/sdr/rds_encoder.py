@@ -138,16 +138,17 @@ class DemoStation:
 
     def __init__(self, pi: int = 0x6201, ps: str = "QRM DEMO", pty: int = 10, tp: bool = True,
                  artist: str = "ZS6SHZ", title: str = "Noise Floor Blues",
-                 ta_period_s: float = 30.0, ta_on_s: float = 5.0, ct_every_s: float = 10.0,
+                 ta_period_s: float = 30.0, ta_on_s: float = 5.0,
                  clock_start: datetime | None = None, utc_offset: timedelta = timedelta(hours=2),
                  music_level: float = 0.6, pilot_level: float = 0.09, rds_level: float = 0.04) -> None:
         self.pi, self.ps, self.pty, self.tp = pi, ps, pty, tp
         self.rt = f"Now playing: {artist} - {title}"
         start = self.rt.index(artist)
         self.tags = [(1, self.rt.index(title, start + len(artist)), len(title)), (4, start, len(artist))]
-        self.ta_period_s, self.ta_on_s, self.ct_every_s = ta_period_s, ta_on_s, ct_every_s
+        self.ta_period_s, self.ta_on_s = ta_period_s, ta_on_s
         tz = timezone(utc_offset)
         self.clock_start = (clock_start or datetime.now(UTC)).astimezone(tz)
+        self._clock_s = self.clock_start.timestamp()
         self.music_level, self.pilot_level, self.rds_level = music_level, pilot_level, rds_level
         self._rt_segments = len(radiotext_codes(self.rt)) // 4
         self._phasors: dict[tuple, np.ndarray] = {}
@@ -157,17 +158,22 @@ class DemoStation:
 
     # --- schedule -----------------------------------------------------------------------------
 
+    def _minute(self, t: float) -> int:
+        return math.floor((self._clock_s + t) / 60)
+
     def ta_at(self, seconds: float) -> bool:
         return seconds % self.ta_period_s >= self.ta_period_s - self.ta_on_s
 
     def group(self, g: int) -> list[int]:
         t = g * GROUP_SECONDS
         pi, pty, tp = self.pi, self.pty, self.tp
-        if g == 3 or (g > 3 and int(t // self.ct_every_s) != int((t - GROUP_SECONDS) // self.ct_every_s)):
+        if self._minute(t) != self._minute(t - GROUP_SECONDS):  # clock time: once a minute, on the minute
             return group_4a(pi, pty, tp, self.clock_start + timedelta(seconds=t))
-        if g % 2 == 0:
-            return group_0a(pi, pty, tp, self.ta_at(t), True, (g // 2) % 4, self.ps)
-        k = (g // 2) % (self._rt_segments + 2)
+        # Clock-time groups are inserted, not substituted: the rest of the schedule moves along.
+        slot = g - (self._minute(t - GROUP_SECONDS) - self._minute(-GROUP_SECONDS))
+        if slot % 2 == 0:
+            return group_0a(pi, pty, tp, self.ta_at(t), True, (slot // 2) % 4, self.ps)
+        k = (slot // 2) % (self._rt_segments + 2)
         if k < self._rt_segments:
             return group_2a(pi, pty, tp, self.RT_AB, k, self.rt)
         if k == self._rt_segments:

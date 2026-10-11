@@ -16,7 +16,7 @@ SECONDS = 5.0
 def run_chain(rate, offset, noise, sizes, seconds=SECONDS, seed=0):
     """Returns the decoder and the time (s) each field first reached its expected value."""
     station = DemoStation(ta_period_s=3.0, ta_on_s=1.5,
-                          clock_start=datetime(2026, 10, 10, 10, 0, tzinfo=UTC))
+                          clock_start=datetime(2026, 10, 10, 9, 59, 58, tzinfo=UTC))  # 4A at t = 2 s
     rng = np.random.default_rng(seed)
     demod = Demodulator(rate, "WFM", offset_hz=offset)
     dec = RdsDecoder(demod.mpx_rate)
