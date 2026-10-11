@@ -4,8 +4,8 @@ import {
 } from "./api";
 import { AudioPlayer } from "./audio";
 import { ReconnectingSocket } from "./ws";
-import { autoRange, panView, passband, snapHz, zoomView, type View } from "./freq";
-import { planPanRetune, planTuneRetune, RetuneController, type Range } from "./retune";
+import { autoRange, clampView, panView, passband, snapHz, zoomView, type View } from "./freq";
+import { planPanRequest, planTuneRetune, RetuneController, type Range, type RetuneRequest } from "./retune";
 import type { SpectrumFrame } from "./protocol";
 import type { PlotInteractionOptions } from "./interact";
 import { byFrequency, openConfig, recallPatch } from "./memories";
@@ -62,25 +62,46 @@ export function viewLimit(r: RadioState): View {
   return range ? { loHz: range[0], hiHz: range[1] } : fullSpan(r);
 }
 
-/** Moves the SDR centre after the view was panned or zoomed past the edge of the span. */
+let lastRetune: RetuneRequest | null = null;
+
+/** Moves the SDR centre after the view was panned past the edge of the span. The tuned frequency
+ *  follows the view when it would otherwise fall out of the usable span. */
 export const retune = new RetuneController({
   plan: () => {
     const r = app.radio;
     const range = deviceRange();
-    return r?.running && range ? planPanRetune(app.view, fullSpan(r), range) : null;
+    return r?.running && range ? planPanRequest(app.view, fullSpan(r), range, r.tune_hz, app.stepHz) : null;
   },
-  send: (centerHz) => setRadio({ center_hz: centerHz }),
+  send: (req) => {
+    lastRetune = req;
+    return setRadio(req);
+  },
+  onSettled: (req) => {
+    lastRetune = null;
+    if (retune.queued) return; // the pan carries on; the next request will cover it
+    const r = app.radio;
+    // A failed request was rolled back (or the device rounded the centre): bring the view back inside the span.
+    if (r && r.center_hz !== req.center_hz) app.view = clampView(app.view, fullSpan(r));
+  },
 });
 
-let pending: StatePatch = {};
-let inflight = false;
+/** True when `tuneHz` is the tuned frequency the pending pan retune asked for. */
+export const isRetuneTune = (tuneHz: number): boolean => lastRetune?.tune_hz === tuneHz;
 
-/** Optimistically apply a patch, then send it. Rapid patches (drag-tuning) are coalesced. */
-export async function setRadio(patch: StatePatch): Promise<void> {
+let pending: StatePatch = {};
+let loop: Promise<void> | null = null;
+
+/** Optimistically apply a patch, then send it. Rapid patches (drag-tuning) are coalesced into the
+ *  running send loop; every caller's promise settles when that loop has finished. */
+export function setRadio(patch: StatePatch): Promise<void> {
   if (app.radio) Object.assign(app.radio, patch);
   Object.assign(pending, patch);
-  if (inflight) return;
-  inflight = true;
+  if (loop) return loop;
+  loop = sendPending();
+  return loop;
+}
+
+async function sendPending(): Promise<void> {
   try {
     while (Object.keys(pending).length) {
       const next = pending;
@@ -99,7 +120,7 @@ export async function setRadio(patch: StatePatch): Promise<void> {
       // keep the original error; the refetch failure adds nothing actionable
     }
   } finally {
-    inflight = false;
+    loop = null;
   }
 }
 
@@ -128,9 +149,9 @@ export function plotOptions(onCursor?: (x: number | null, y: number | null) => v
     zoomAt: (anchor, factor) => {
       const r = app.radio;
       if (!r) return;
+      // Zooming never moves the centre: it stays inside the span (or the range, while a pan is catching up).
       const span = fullSpan(r);
-      app.view = zoomView(app.view, anchor, factor, viewLimit(r), 1000, span.hiHz - span.loHz);
-      retune.poke();
+      app.view = zoomView(app.view, anchor, factor, retune.active ? viewLimit(r) : span, 1000, span.hiHz - span.loHz);
     },
     tune: (hz) => {
       if (app.radio?.running) void tuneRadio(snapHz(hz, Math.min(app.stepHz, 1000)));
@@ -179,6 +200,7 @@ export async function refreshDevices(): Promise<void> {
 }
 
 export async function startStop(): Promise<void> {
+  retune.cancel();
   try {
     if (app.radio?.running) {
       if (app.audioOn) await toggleAudio();

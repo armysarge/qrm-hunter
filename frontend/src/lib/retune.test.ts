@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { clampCentre, planPanRetune, planTuneRetune, RetuneController } from "./retune";
+import { clampCentre, planPanRequest, planPanRetune, planTuneRetune, RetuneController } from "./retune";
 
 const RTL: [number, number] = [500_000, 1_766_000_000];
 const SYN: [number, number] = [100_000, 1_800_000_000];
@@ -52,6 +52,55 @@ describe("planPanRetune", () => {
   it("ignores an empty view", () => expect(planPanRetune({ loHz: 0, hiHz: 0 }, s, SYN)).toBeNull());
 });
 
+describe("planPanRetune edge cases", () => {
+  it("does not loop for a range as narrow as one span", () => {
+    const s = span(1_000_000, 1_000_000);
+    expect(planPanRetune({ loHz: 700_000, hiHz: 1_300_000 }, s, [500_000, 1_500_000])).toBeNull();
+    expect(planPanRetune({ loHz: 700_000, hiHz: 1_300_000 }, s, [600_000, 1_400_000])).toBeNull(); // narrower: centred already
+  });
+  it("moves a too-wide span to the middle of a narrow range once", () => {
+    expect(planPanRetune({ loHz: 0, hiHz: 100 }, { loHz: 1_000, hiHz: 3_000 }, [0, 1_000])).toBe(500);
+  });
+  it("recentres a view wider than the span once, then settles", () => {
+    const s = span(7_100_000);
+    const wide = { loHz: s.loHz - 100_000, hiHz: s.hiHz + 300_000 };
+    const c = planPanRetune(wide, s, SYN)!;
+    expect(c).toBe(7_200_000);
+    expect(planPanRetune(wide, span(c), SYN)).toBeNull();
+  });
+});
+
+describe("planPanRequest", () => {
+  const s = span(7_100_000);
+  it("leaves the tuned frequency alone while it stays in the usable span", () => {
+    const view = { loHz: s.loHz + 400_000, hiHz: s.hiHz + 400_000 };
+    expect(planPanRequest(view, s, SYN, 7_100_000, 1000)).toEqual({ center_hz: 7_500_000 });
+  });
+  it("makes the tuned frequency follow the view centre, snapped to the step, when it would leave", () => {
+    const view = { loHz: 9_000_000, hiHz: 9_200_000 };
+    expect(planPanRequest(view, s, SYN, 7_100_000, 1000)).toEqual({ center_hz: 9_100_000, tune_hz: 9_100_000 });
+    expect(planPanRequest({ loHz: 9_000_300, hiHz: 9_200_300 }, s, SYN, 7_100_000, 5000))
+      .toEqual({ center_hz: 9_100_300, tune_hz: 9_100_000 });
+  });
+  it("keeps the followed tune inside the usable span and the device range", () => {
+    const r = planPanRequest({ loHz: 100_000, hiHz: 100_500 }, { loHz: 3_000_000, hiHz: 5_048_000 }, SYN, 4_000_000, 1000)!;
+    expect(r.tune_hz).toBeGreaterThanOrEqual(100_000);
+    expect(Math.abs(r.tune_hz! - r.center_hz)).toBeLessThanOrEqual(0.45 * 2_048_000);
+  });
+  it("sends nothing when no centre change is needed", () => {
+    expect(planPanRequest({ loHz: 7_000_000, hiHz: 7_100_000 }, s, SYN, 7_050_000, 1000)).toBeNull();
+  });
+});
+
+describe("planTuneRetune at the device edges", () => {
+  it("does not move when the centre is already pinned at the maximum", () => {
+    expect(planTuneRetune(1_799_990_000, span(1_800_000_000 - 1_024_000), SYN)).toBeNull();
+  });
+  it("does not move when pinned at the minimum", () => {
+    expect(planTuneRetune(100_000, span(100_000 + 1_024_000), SYN)).toBeNull();
+  });
+});
+
 describe("planTuneRetune", () => {
   const s = span(7_100_000);
   it("leaves the middle of the span alone", () => expect(planTuneRetune(7_100_000, s, SYN)).toBeNull());
@@ -70,8 +119,9 @@ describe("RetuneController", () => {
     t = 0;
   });
   afterEach(() => vi.useRealTimers());
-  const make = (plan: () => number | null, send: (c: number) => Promise<unknown>) =>
-    new RetuneController({ plan, send, minIntervalMs: 150, now: () => t });
+  const make = (
+    plan: () => number | null, send: (c: number) => Promise<unknown>, extra: { onSettled?(c: number): void } = {},
+  ) => new RetuneController<number>({ plan, send, minIntervalMs: 150, now: () => t, ...extra });
 
   it("sends the first retune immediately", () => {
     const send = vi.fn().mockResolvedValue(undefined);
@@ -127,5 +177,48 @@ describe("RetuneController", () => {
     t = 1000;
     c.poke();
     expect(send).toHaveBeenCalledTimes(2);
+  });
+  it("reports a timer-pending retune as active, and cancel() clears it", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const c = make(() => 7, send);
+    c.poke();
+    await vi.advanceTimersByTimeAsync(0);
+    t = 50;
+    c.poke();
+    expect(c.active).toBe(true);
+    c.cancel();
+    expect(c.active).toBe(false);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+  it("retries on a poke during the cooldown after a failed send", async () => {
+    const send = vi.fn().mockRejectedValueOnce(new Error("x")).mockResolvedValue(undefined);
+    const c = make(() => 7, send);
+    c.poke();
+    await vi.advanceTimersByTimeAsync(0);
+    t = 40;
+    c.poke();
+    t = 150;
+    await vi.advanceTimersByTimeAsync(150);
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+  it("calls onSettled after the send with active already false, even if the centre was not applied", async () => {
+    // setRadio never rejects: after a failed request it rolls back and resolves.
+    const applied = { centre: 1 };
+    const seen: { active: boolean; applied: number }[] = [];
+    let c!: RetuneController<number>;
+    c = make(() => 9, async () => undefined, { onSettled: () => seen.push({ active: c.active, applied: applied.centre }) });
+    c.poke();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(seen).toEqual([{ active: false, applied: 1 }]);
+  });
+  it("exposes movement that arrived mid-flight as queued", () => {
+    let release!: () => void;
+    const c = make(() => 7, () => new Promise<void>((r) => { release = r; }));
+    c.poke();
+    expect(c.queued).toBe(false);
+    c.poke();
+    expect(c.queued).toBe(true);
+    release();
   });
 });

@@ -12,7 +12,7 @@
   import RdsCard from "./components/RdsCard.svelte";
   import TaSnackbar from "./components/TaSnackbar.svelte";
   import {
-    app, fullSpan, noteFrame, noteRds, reconcileAudio, recallMemory, refreshDevices, refreshMemories, retune, tuneRadio,
+    app, fullSpan, noteFrame, noteRds, reconcileAudio, recallMemory, refreshDevices, refreshMemories, retune, isRetuneTune, tuneRadio,
     viewLimit,
   } from "./lib/store.svelte";
   import { memoryKey } from "./lib/memories";
@@ -21,12 +21,15 @@
   import { parseSpectrumFrame } from "./lib/protocol";
   import { frameBus } from "./lib/framebus";
   import { clampView, snapHz } from "./lib/freq";
-  import { loadSplit } from "./lib/split";
+  import { clampSplit, loadSplit } from "./lib/split";
   import type { ServerEvent } from "./lib/types";
 
   let statusH = $state(40);
+  // The stored preference is never shrunk by a small window: only the rendered share is clamped.
   let split = $state(loadSplit());
   let cardEl = $state<HTMLElement>();
+  let cardH = $state(0);
+  const shownSplit = $derived(clampSplit(split, cardH - 8));
 
   const events = new ReconnectingSocket("/ws/events", {
     onStatus: (ok) => (app.connected = ok),
@@ -99,9 +102,17 @@
       let next = cur.hiHz > cur.loHz ? clampView(cur, following ? viewLimit(r) : limit) : limit;
       const retuned = tune !== lastTune;
       lastTune = tune;
-      if (retuned && !following && (tune < next.loHz || tune > next.hiHz)) next = limit;
+      const ours = following && isRetuneTune(tune); // the tuned frequency the pan retune itself asked for
+      if (retuned && !ours && (tune < next.loHz || tune > next.hiHz)) next = limit;
       if (next.loHz !== cur.loHz || next.hiHz !== cur.hiHz) app.view = next;
     });
+  });
+
+  // A queued pan retune does not outlive the radio session or the device it was planned for.
+  const sessionKey = $derived(`${app.radio?.running}|${app.radio?.device_id}|${app.selectedDevice}`);
+  $effect(() => {
+    void sessionKey;
+    untrack(() => retune.cancel());
   });
 
   $effect(() => {
@@ -162,9 +173,9 @@
   <div class="full"><TopBar /></div>
   <div class="full"><BandBar /></div>
   <div class="full">{#if app.radio?.running && app.radio.mode === "WFM"}<RdsCard />{/if}</div>
-  <main class="card" bind:this={cardEl} style:--split="{split}fr" style:--rest="{100 - split}fr">
+  <main class="card" bind:this={cardEl} bind:clientHeight={cardH} style:--split="{shownSplit}fr" style:--rest="{100 - shownSplit}fr">
     <section class="spectrum" aria-label="Spectrum"><Spectrum /></section>
-    <Splitter bind:value={split} container={cardEl} />
+    <Splitter value={shownSplit} container={cardEl} onchange={(v) => (split = v)} />
     <section class="waterfall" aria-label="Waterfall"><Waterfall /></section>
   </main>
   {#if app.memoriesOpen}<MemoriesDrawer />{/if}

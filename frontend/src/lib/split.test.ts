@@ -74,3 +74,21 @@ describe("storage", () => {
     expect(() => saveSplit(40, bad)).not.toThrow();
   });
 });
+
+describe("render-time clamping", () => {
+  it("shrinks the shown split in a small window but restores the preference when it grows again", () => {
+    const preference = 70;
+    expect(clampSplit(preference, 200)).toBeLessThan(preference);
+    expect((clampSplit(preference, 200) / 100) * 200).toBeGreaterThanOrEqual(80);
+    expect(clampSplit(preference, 200) >= 50).toBe(true);
+    expect(clampSplit(preference, 1000)).toBe(70);
+  });
+  it("keeps both plots at 80 px at the extremes of a short card", () => {
+    for (const h of [180, 250, 400]) {
+      const hi = clampSplit(99, h);
+      const lo = clampSplit(0, h);
+      expect(((100 - hi) / 100) * h).toBeGreaterThanOrEqual(80 - 1e-9);
+      expect((lo / 100) * h).toBeGreaterThanOrEqual(80 - 1e-9);
+    }
+  });
+});

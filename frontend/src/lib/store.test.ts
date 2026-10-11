@@ -7,7 +7,7 @@ const patchState = vi.fn(
 const getState = vi.fn();
 vi.mock("./api", () => ({ patchState: (...a: unknown[]) => (patchState as any)(...a), getState: () => getState() }));
 
-import { app, setRadio } from "./store.svelte";
+import { app, retune, setRadio } from "./store.svelte";
 
 const radio = (tune: number) => ({ tune_hz: tune, running: true, mode: "AM" }) as any;
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -55,5 +55,56 @@ describe("setRadio", () => {
     deferreds[0].reject(new Error("boom"));
     await p;
     expect(app.error).toBe("boom");
+  });
+});
+
+describe("pan retune", () => {
+  const live = (center: number, tune = center) =>
+    ({ device_id: "d", running: true, mode: "AM", center_hz: center, tune_hz: tune, sample_rate: 2_048_000 }) as any;
+  beforeEach(async () => {
+    retune.cancel();
+    await new Promise((r) => setTimeout(r, 170)); // let the controller's cooldown from an earlier test pass
+    app.devices = [{ id: "d", freq_range: [100_000, 1_800_000_000] }] as any;
+    app.stepHz = 1000;
+    app.radio = live(7_100_000);
+    app.view = { loHz: 7_900_000, hiHz: 9_000_000 };
+  });
+
+  it("sends the new centre with the tuned frequency following the view", async () => {
+    retune.poke();
+    await tick();
+    expect(patchState).toHaveBeenCalledWith({ center_hz: 8_450_000, tune_hz: 8_450_000 });
+    deferreds[0].resolve(live(8_450_000));
+    await tick();
+    expect(app.view).toEqual({ loHz: 7_900_000, hiHz: 9_000_000 });
+  });
+
+  it("snaps the view back into the span when the request fails", async () => {
+    getState.mockResolvedValue(live(7_100_000));
+    retune.poke();
+    await tick();
+    deferreds[0].reject(new Error("device busy"));
+    await tick();
+    await tick();
+    expect(app.error).toBe("device busy");
+    expect(app.view.hiHz).toBeLessThanOrEqual(8_124_000);
+    expect(app.view.hiHz - app.view.loHz).toBe(1_100_000);
+    expect(retune.active).toBe(false);
+  });
+
+  it("waits for the real round trip even when another send is already in flight", async () => {
+    const other = setRadio({ gain_db: 10 });
+    await tick();
+    let done = false;
+    const p = setRadio({ center_hz: 8_450_000 }).then(() => (done = true));
+    await tick();
+    expect(done).toBe(false);
+    deferreds[0].resolve(live(7_100_000));
+    await tick();
+    expect(patchState).toHaveBeenCalledTimes(2);
+    expect(done).toBe(false);
+    deferreds[1].resolve(live(8_450_000));
+    await Promise.all([other, p]);
+    expect(done).toBe(true);
   });
 });

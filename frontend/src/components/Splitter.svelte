@@ -2,12 +2,16 @@
   import { onDestroy } from "svelte";
   import { clampSplit, pxToSplit, saveSplit, splitBounds, splitForKey, SPLIT_DEFAULT } from "../lib/split";
 
-  /** `value` is the top pane's share (percent) of `container`'s height minus the handle; `thickness` is the handle height in px. */
-  let { value = $bindable(), container, thickness = 8 }: { value: number; container: HTMLElement | undefined; thickness?: number } = $props();
+  /** `value` is the top pane's share (percent) of `container`'s height minus the handle; `thickness` is the
+   *  handle height in px. `onchange` reports user changes; only those are written to storage. */
+  let { value, container, thickness = 8, onchange }: {
+    value: number; container: HTMLElement | undefined; thickness?: number; onchange(pct: number): void;
+  } = $props();
 
   let dragging = $state(false);
   let raf = 0;
   let queued: number | null = null;
+  let moved = false;
 
   let height = $state(0);
   $effect(() => {
@@ -25,33 +29,37 @@
   // Pointer moves arrive faster than frames; apply only the latest once per frame.
   function flush() {
     raf = 0;
-    if (queued !== null) value = queued;
+    if (queued !== null) onchange(queued);
     queued = null;
   }
   function commit(next: number) {
     if (raf) cancelAnimationFrame(raf);
     raf = 0;
     queued = null;
-    value = clampSplit(next, available());
-    saveSplit(value);
+    const v = clampSplit(next, available());
+    onchange(v);
+    saveSplit(v);
   }
 
   function onDown(e: PointerEvent) {
     if (e.button !== 0 || !container) return;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     dragging = true;
-    e.preventDefault();
+    moved = false;
+    e.preventDefault(); // no text selection while dragging; this also stops the default focus, so focus here
+    (e.currentTarget as HTMLElement).focus();
   }
   function onMove(e: PointerEvent) {
     if (!dragging || !container) return;
     const top = container.getBoundingClientRect().top;
+    moved = true;
     queued = pxToSplit(e.clientY - top - thickness / 2, available());
     raf ||= requestAnimationFrame(flush);
   }
   function end() {
     if (!dragging) return;
     dragging = false;
-    commit(queued ?? value);
+    if (moved) commit(queued ?? value); // a plain click must not overwrite the stored preference
   }
   function onKey(e: KeyboardEvent) {
     if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
@@ -73,7 +81,8 @@
   role="separator"
   aria-orientation="horizontal"
   aria-label="Resize spectrum and waterfall"
-  aria-valuenow={Math.round(value)}
+  aria-valuenow={Math.min(Math.max(Math.round(value), Math.ceil(bounds.min)), Math.floor(bounds.max))}
+  aria-valuetext="Spectrum {Math.round(value)} %"
   aria-valuemin={Math.ceil(bounds.min)}
   aria-valuemax={Math.floor(bounds.max)}
   tabindex="0"
