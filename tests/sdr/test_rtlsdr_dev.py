@@ -206,3 +206,38 @@ def test_r828d_v4_keeps_tuner_mode_on_hf(monkeypatch):
 def test_unknown_tuner_keeps_requested_input(monkeypatch):
     d, (fake,) = make_with_tuner(monkeypatch, None)
     assert d.configure(DeviceConfig(center_hz=7.1e6, direct_sampling="off")).direct_sampling == "off"
+
+
+class HfStuckRtl(FakeRtl):
+    """librtlsdr re-tunes to the old frequency when leaving direct sampling and fails below 24 MHz."""
+
+    def set_direct_sampling(self, v):
+        super().set_direct_sampling(v)
+        if v == 0 and (self.center_freq or 0) < 24e6:
+            raise OSError("<LIBUSB_ERROR_IO (-1): Input/output error> Could not set direct sampling")
+
+
+def test_leaving_direct_sampling_from_hf_still_tunes_vhf(monkeypatch):
+    import qrm_hunter.sdr.rtlsdr_dev as mod
+
+    monkeypatch.setattr(mod, "_tuner_type", lambda sdr: 5)  # R820T (v3)
+    fakes = []
+    d = RtlSdrDevice(0, "00000001", factory=lambda i: fakes.append(HfStuckRtl(i)) or fakes[-1])
+    d.open()
+    d.configure(DeviceConfig(center_hz=7.1e6, direct_sampling="off"))  # auto → Direct Q on HF
+    applied = d.configure(DeviceConfig(center_hz=145.5e6, direct_sampling="q"))  # auto → tuner on 2 m
+    assert (applied.direct_sampling, fakes[0].ds, fakes[0].center_freq) == ("off", 0, 145.5e6)
+
+
+def test_entering_direct_sampling_failure_is_still_reported(monkeypatch):
+    import qrm_hunter.sdr.rtlsdr_dev as mod
+
+    class Broken(FakeRtl):
+        def set_direct_sampling(self, v):
+            raise OSError("LIBUSB_ERROR_IO")
+
+    monkeypatch.setattr(mod, "_tuner_type", lambda sdr: 5)
+    d = RtlSdrDevice(0, "00000001", factory=Broken)
+    d.open()
+    with pytest.raises(DeviceError):
+        d.configure(DeviceConfig(center_hz=7.1e6, direct_sampling="q"))

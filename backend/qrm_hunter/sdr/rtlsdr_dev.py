@@ -130,7 +130,14 @@ class RtlSdrDevice:
             # a rate change alters the tuner's IF bandwidth, so the frequency is rewritten too.
             retuner = retune = False
             if applied.direct_sampling != self._direct:
-                sdr.set_direct_sampling(_DIRECT[applied.direct_sampling])
+                try:
+                    sdr.set_direct_sampling(_DIRECT[applied.direct_sampling])
+                except Exception:
+                    # Leaving direct sampling, librtlsdr re-tunes to the *previous* (HF) frequency,
+                    # which the tuner cannot reach, and reports failure although the mode did
+                    # change. The new frequency is written just below; if that fails too, it raises.
+                    if applied.direct_sampling != "off":
+                        raise
                 self._direct = applied.direct_sampling
                 retuner = retune = True
             if applied.sample_rate != self._rate:
