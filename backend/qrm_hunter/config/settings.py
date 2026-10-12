@@ -12,9 +12,15 @@ from typing import Literal
 
 import tomli_w
 from platformdirs import user_config_dir
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 log = logging.getLogger(__name__)
+
+CALLSIGN_PATTERN = r"^[A-Za-z0-9/]*$"
+
+
+def _upper(v: str | None) -> str | None:
+    return v.upper() if isinstance(v, str) else v
 
 
 class Settings(BaseModel):
@@ -26,6 +32,10 @@ class Settings(BaseModel):
     last_tune_hz: int = 7_100_000
     token: str | None = None
     prebuffer_s: float = Field(10.0, ge=0, le=60)
+    recordings_dir: str = Field("", max_length=1000)  # "" = Documents/QRM Hunter/recordings
+    callsign: str = Field("", max_length=12, pattern=CALLSIGN_PATTERN)
+
+    _callsign_upper = field_validator("callsign")(_upper)
 
 
 class SettingsPatch(BaseModel):
@@ -38,6 +48,10 @@ class SettingsPatch(BaseModel):
     theme: Literal["dark", "light"] | None = None
     colormap: Literal["turbo", "viridis", "grey"] | None = None
     prebuffer_s: float | None = Field(None, ge=0, le=60)
+    recordings_dir: str | None = Field(None, max_length=1000)
+    callsign: str | None = Field(None, max_length=12, pattern=CALLSIGN_PATTERN)
+
+    _callsign_upper = field_validator("callsign")(_upper)
 
 
 def default_settings_path() -> Path:

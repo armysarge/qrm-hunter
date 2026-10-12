@@ -111,3 +111,19 @@ def test_save_after_unreadable_load_skips_when_backup_fails(tmp_path, monkeypatc
         store.save(Settings(region=3))  # must not raise, must not overwrite
     assert "not overwriting" in caplog.text
     assert path.read_text(encoding="utf-8") == "region = 2\n"
+
+
+def test_recordings_dir_and_callsign():
+    from pydantic import ValidationError
+
+    from qrm_hunter.config.settings import SettingsPatch
+
+    s = Settings(recordings_dir="D:/QRM", callsign="zs6shz/p")
+    assert s.callsign == "ZS6SHZ/P" and s.recordings_dir == "D:/QRM"
+    assert Settings().recordings_dir == "" and Settings().callsign == ""
+    for bad in ("ZS6 SHZ", "x" * 13, "zs6<shz>"):
+        try:
+            SettingsPatch(callsign=bad)
+        except ValidationError:
+            continue
+        raise AssertionError(bad)
