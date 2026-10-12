@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const deferreds: { resolve: (v: unknown) => void; reject: (e: unknown) => void }[] = [];
 const patchState = vi.fn(
@@ -7,7 +7,7 @@ const patchState = vi.fn(
 const getState = vi.fn();
 vi.mock("./api", () => ({ patchState: (...a: unknown[]) => (patchState as any)(...a), getState: () => getState() }));
 
-import { app, retune, setRadio } from "./store.svelte";
+import { app, plotOptions, retune, setRadio, tuneRadio } from "./store.svelte";
 
 const radio = (tune: number) => ({ tune_hz: tune, running: true, mode: "AM" }) as any;
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -90,6 +90,48 @@ describe("pan retune", () => {
     expect(app.view.hiHz).toBeLessThanOrEqual(8_124_000);
     expect(app.view.hiHz - app.view.loHz).toBe(1_100_000);
     expect(retune.active).toBe(false);
+  });
+
+  describe("while a recording holds the centre", () => {
+    beforeEach(() => {
+      app.record = { ...app.record, phase: "recording" };
+      app.view = { loHz: 6_100_000, hiHz: 7_100_000 };
+    });
+    afterEach(async () => {
+      app.record = { ...app.record, phase: "idle" };
+      // Let the send loop finish so the next test starts with none in flight.
+      for (const d of deferreds) d.resolve(live(7_100_000));
+      await tick();
+    });
+
+    it("keeps a pan past the span edge inside the span and sends no retune", async () => {
+      plotOptions().panBy(5_000_000);
+      await tick();
+      expect(app.view).toEqual({ loHz: 7_124_000, hiHz: 8_124_000 });
+      retune.poke();
+      await tick();
+      expect(patchState).not.toHaveBeenCalled();
+    });
+
+    it("tunes near the edge without moving the centre", async () => {
+      void tuneRadio(8_100_000); // outer 5 % of the span: would normally move the centre
+      await tick();
+      expect(patchState).toHaveBeenCalledWith({ tune_hz: 8_021_600 }); // centre + 0.45 * rate
+      expect(app.radio!.center_hz).toBe(7_100_000);
+    });
+
+    it("still tunes freely within the span", async () => {
+      void tuneRadio(7_300_000);
+      await tick();
+      expect(patchState).toHaveBeenCalledWith({ tune_hz: 7_300_000 });
+    });
+
+    it("lets pan and edge tuning move the centre again once the recording has ended", async () => {
+      app.record = { ...app.record, phase: "idle" };
+      void tuneRadio(8_100_000);
+      await tick();
+      expect(patchState).toHaveBeenCalledWith(expect.objectContaining({ tune_hz: 8_100_000, center_hz: expect.any(Number) }));
+    });
   });
 
   it("waits for the real round trip even when another send is already in flight", async () => {

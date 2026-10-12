@@ -5,7 +5,9 @@ import {
 import { AudioPlayer } from "./audio";
 import { ReconnectingSocket } from "./ws";
 import { autoRange, clampView, panView, passband, snapHz, zoomView, type View } from "./freq";
-import { planPanRequest, planTuneRetune, RetuneController, type Range, type RetuneRequest } from "./retune";
+import {
+  planPanRequest, planTuneRetune, RetuneController, SPAN_USABLE, type Range, type RetuneRequest,
+} from "./retune";
 import type { SpectrumFrame } from "./protocol";
 import type { AnalysisUi } from "./analysis";
 import type { PlotInteractionOptions } from "./interact";
@@ -71,10 +73,17 @@ export function deviceRange(): Range | null {
   return app.devices.find((d) => d.id === id)?.freq_range ?? null;
 }
 
+/** True while a Start/Stop recording is under way. Moving the SDR centre would end it, so panning and
+ *  click-tuning stay inside the span; an explicit retune (typed frequency, band, memory) still may. */
+export function recordingHoldsCentre(): boolean {
+  const phase = app.record.phase;
+  return phase === "starting" || phase === "recording" || phase === "stopping";
+}
+
 /** Where the visible range may go: the whole device range while running (panning past the span edge
- *  retunes the SDR), otherwise only the current span. */
+ *  retunes the SDR), otherwise, or while a recording holds the centre, only the current span. */
 export function viewLimit(r: RadioState): View {
-  const range = r.running ? deviceRange() : null;
+  const range = r.running && !recordingHoldsCentre() ? deviceRange() : null;
   return range ? { loHz: range[0], hiHz: range[1] } : fullSpan(r);
 }
 
@@ -86,7 +95,7 @@ export const retune = new RetuneController({
   plan: () => {
     const r = app.radio;
     const range = deviceRange();
-    return r?.running && range ? planPanRequest(app.view, fullSpan(r), range, r.tune_hz, app.stepHz) : null;
+    return r?.running && range && !recordingHoldsCentre() ? planPanRequest(app.view, fullSpan(r), range, r.tune_hz, app.stepHz) : null;
   },
   send: (req) => {
     lastRetune = req;
@@ -142,9 +151,14 @@ async function sendPending(): Promise<void> {
 }
 
 /** Tune the demodulator. A frequency in the outer 5 % of the span, or beyond it, moves the SDR centre
- *  in the same request so the display keeps following. */
+ *  in the same request so the display keeps following. While a recording holds the centre the
+ *  frequency is kept inside the usable span instead, so the engine has no reason to move it. */
 export function tuneRadio(hz: number): Promise<void> {
   const r = app.radio;
+  if (r && recordingHoldsCentre()) {
+    const usable = SPAN_USABLE * r.sample_rate;
+    return setRadio({ tune_hz: Math.round(Math.min(Math.max(hz, r.center_hz - usable), r.center_hz + usable)) });
+  }
   const range = deviceRange();
   const centre = r && range ? planTuneRetune(hz, fullSpan(r), range) : null;
   return setRadio(centre === null ? { tune_hz: hz } : { tune_hz: hz, center_hz: centre });
