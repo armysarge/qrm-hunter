@@ -1,6 +1,7 @@
 <script lang="ts">
   import FrequencyDisplay from "./FrequencyDisplay.svelte";
   import RecordButton from "./RecordButton.svelte";
+  import { analyseLive } from "../lib/analysis-actions";
   import { app, player, refreshDevices, setRadio, startStop, toggleAudio } from "../lib/store.svelte";
   import { BW_OPTIONS, STEP_OPTIONS } from "../lib/freq";
   import type { DirectSampling, Mode } from "../lib/types";
@@ -92,8 +93,12 @@
 
   <div class="group audio">
     <RecordButton />
+    <button class="analyse" disabled={!running || app.analysis.state === "running"} onclick={analyseLive} aria-label="Analyse"
+      title="Identify the interference in the last {app.recordSeconds} s of the visible span or selected region">
+      <span class="material-symbols-rounded" aria-hidden="true">troubleshoot</span><span class="an-label">Analyse</span>
+    </button>
     <button class="memories" class:on={app.memoriesOpen} aria-pressed={app.memoriesOpen} title="Frequency memories" aria-label="Memories"
-      onclick={() => (app.memoriesOpen = !app.memoriesOpen)}>
+      onclick={() => { app.memoriesOpen = !app.memoriesOpen; app.analysisOpen = false; app.recordingsOpen = false; }}>
       <span class="material-symbols-rounded" aria-hidden="true">bookmarks</span><span class="mem-label">Memories</span>
     </button>
     <button class="listen" class:on={app.audioOn} aria-pressed={app.audioOn} disabled={!running || app.audioBusy} onclick={toggleAudio}>
@@ -125,7 +130,7 @@
   .hero { grid-area: hero; display: flex; align-items: center; justify-content: center; gap: 4px; min-width: 0; }
   .star { flex: none; }
   .star .material-symbols-rounded { font-size: 24px; color: var(--md-primary); }
-  .memories { padding: 0 16px 0 12px; }
+  .memories, .analyse { padding: 0 16px 0 12px; }
   .memories.on { background: var(--md-primary-container); color: var(--md-on-primary-container); }
   .tools { grid-area: tools; }
   .audio { grid-area: audio; }
@@ -150,8 +155,8 @@
     .hero { justify-content: flex-start; }
     .device { justify-self: end; }
     /* Memories becomes an icon button so the Record button fits on the first row. */
-    .mem-label { display: none; }
-    .memories { width: 40px; padding: 0; }
+    .mem-label, .an-label { display: none; }
+    .memories, .analyse { width: 40px; padding: 0; }
   }
   @media (max-width: 760px) {
     .top { display: flex; flex-wrap: wrap; }

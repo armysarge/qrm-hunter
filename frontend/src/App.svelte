@@ -9,10 +9,11 @@
   import StatusBar from "./components/StatusBar.svelte";
   import MemoriesDrawer from "./components/MemoriesDrawer.svelte";
   import MemoryDialog from "./components/MemoryDialog.svelte";
+  import AnalysisPanel from "./components/AnalysisPanel.svelte";
   import RdsCard from "./components/RdsCard.svelte";
   import TaSnackbar from "./components/TaSnackbar.svelte";
   import {
-    app, fullSpan, noteFrame, noteRds, reconcileAudio, recallMemory, refreshDevices, refreshMemories, retune, isRetuneTune, tuneRadio,
+    app, fullSpan, noteFrame, noteRds, reconcileAudio, recallMemory, refreshDevices, refreshMemories, refreshRecordings, retune, isRetuneTune, tuneRadio,
     viewLimit,
   } from "./lib/store.svelte";
   import { memoryKey } from "./lib/memories";
@@ -22,6 +23,7 @@
   import { frameBus } from "./lib/framebus";
   import { clampView, snapHz } from "./lib/freq";
   import { clampSplit, loadSplit } from "./lib/split";
+  import { closeAnalysis, saveAnalysedClip } from "./lib/analysis-actions";
   import { onRecordEvent, syncRecordStatus } from "./lib/record-actions";
   import { clampSeconds } from "./lib/recording";
   import { keepRegion } from "./lib/region";
@@ -40,6 +42,7 @@
     // A recording that started or ended while disconnected is picked up from its status.
     onOpen: () => {
       void refreshMemories();
+      void refreshRecordings();
       void syncRecordStatus();
     },
     onMessage: (ev) => {
@@ -49,6 +52,7 @@
       else if (msg.type === "stats") app.stats = msg.stats;
       else if (msg.type === "rds") noteRds(msg.rds);
       else if (msg.type === "recording" || msg.type === "recording_stopped") onRecordEvent(msg);
+      else if (msg.type === "recordings") void refreshRecordings(); // the folder changed
       else if (msg.type === "memories") void refreshMemories(); // changed here or in another window
     },
   });
@@ -195,7 +199,11 @@
     <Splitter value={shownSplit} container={cardEl} onchange={(v) => (split = v)} />
     <section class="waterfall" aria-label="Waterfall"><Waterfall /></section>
   </main>
-  {#if app.memoriesOpen}<MemoriesDrawer />{/if}
+  {#if app.analysisOpen}
+    <AnalysisPanel ui={app.analysis} onclose={closeAnalysis} onsave={saveAnalysedClip} />
+  {:else if app.memoriesOpen}
+    <MemoriesDrawer />
+  {/if}
   <div class="statusbar full" bind:clientHeight={statusH}><StatusBar /></div>
   <ErrorBanner />
   <TaSnackbar />

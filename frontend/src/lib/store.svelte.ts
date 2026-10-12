@@ -1,12 +1,13 @@
 import {
-  closeSession, createMemory, deleteMemory, getState, listDevices, listMemories, openSession, patchSettings,
-  patchState, updateMemory,
+  closeSession, createMemory, deleteMemory, getState, listDevices, listMemories, listRecordings, openSession,
+  patchSettings, patchState, updateMemory,
 } from "./api";
 import { AudioPlayer } from "./audio";
 import { ReconnectingSocket } from "./ws";
 import { autoRange, clampView, panView, passband, snapHz, zoomView, type View } from "./freq";
 import { planPanRequest, planTuneRetune, RetuneController, type Range, type RetuneRequest } from "./retune";
 import type { SpectrumFrame } from "./protocol";
+import type { AnalysisUi } from "./analysis";
 import type { PlotInteractionOptions } from "./interact";
 import { byFrequency, openConfig, recallPatch } from "./memories";
 import { selectBand } from "./bands";
@@ -14,7 +15,8 @@ import { taSnackbar, type TaSnack } from "./rds";
 import { initialRecord, type RecordUi } from "./recording";
 import { regionBetween, type Region, type SpanChoice } from "./region";
 import type {
-  Band, DeviceInfo, Memory, MemoryFields, Mode, RadioState, RdsState, Settings, SettingsPatch, StatePatch, Stats,
+  AppInfo, Band, DeviceInfo, Memory, MemoryFields, Mode, RadioState, RdsState, RecordingInfo, Settings, SettingsPatch,
+  StatePatch, Stats,
 } from "./types";
 
 export const app = $state({
@@ -50,6 +52,13 @@ export const app = $state({
   spanChoice: "visible" as SpanChoice,
   record: initialRecord() as RecordUi,
   recordSeconds: 10,
+  /** The side column shows one panel at a time: analysis, recordings or memories. */
+  analysis: { state: "idle" } as AnalysisUi,
+  analysisOpen: false,
+  recordings: [] as RecordingInfo[],
+  recordingsOpen: false,
+  settingsOpen: false,
+  appInfo: null as AppInfo | null,
 });
 
 export function fullSpan(r: RadioState): View {
@@ -304,6 +313,21 @@ export async function saveSettings(patch: SettingsPatch): Promise<void> {
     app.settings = await patchSettings(patch);
   } catch (e) {
     fail(e);
+  }
+}
+
+// --- Recordings ---
+
+let recordingSeq = 0;
+
+/** Reloads the recordings list; an older in-flight fetch never overwrites a newer one. */
+export async function refreshRecordings(): Promise<void> {
+  const seq = ++recordingSeq;
+  try {
+    const list = await listRecordings();
+    if (seq === recordingSeq) app.recordings = list;
+  } catch (e) {
+    if (seq === recordingSeq) fail(e);
   }
 }
 
