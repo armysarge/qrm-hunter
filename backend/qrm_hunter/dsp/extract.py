@@ -62,15 +62,23 @@ class SpanExtractor:
         self._stages = [Decimator(f) for f in factors]
         self.out_rate = self.in_rate / math.prod(factors) if factors else self.in_rate
         self._phase = 0.0
+        self._step = -2 * np.pi * self._offset / self.in_rate
+        # The rotator for one block length is cached: live blocks all have the same size, so
+        # each block costs one multiply instead of a complex exp.
+        self._rot_n = -1
+        self._rot = np.empty(0, np.complex64)
 
     def process(self, block: np.ndarray) -> np.ndarray:
         x = np.asarray(block, np.complex64)
         if x.size == 0:
             return np.empty(0, np.complex64)
         if self._offset:
-            step = -2 * np.pi * self._offset / self.in_rate
-            x = x * np.exp(1j * (self._phase + step * np.arange(x.size))).astype(np.complex64)
-            self._phase = float((self._phase + step * x.size) % (2 * np.pi))
+            n = x.size
+            if n != self._rot_n:
+                self._rot = np.exp(1j * self._step * np.arange(n)).astype(np.complex64)
+                self._rot_n = n
+            x = x * self._rot * np.complex64(np.exp(1j * self._phase))
+            self._phase = float((self._phase + self._step * n) % (2 * np.pi))
         for stage in self._stages:
             x = stage.process(x)
         return x

@@ -28,6 +28,46 @@ JOIN_TIMEOUT = 2.0  # seconds to wait for a run's threads on close
 DEV_LOCK_TIMEOUT = 3.0  # seconds to wait for an in-progress device read/configure
 RDS_MIN_INTERVAL = 0.2  # seconds between published RDS updates (at most 5 per second)
 RDS_RETUNE_HZ = 50_000.0  # a retune further than this starts RDS decoding afresh
+TAP_SECONDS = 2.0  # default tap queue capacity, in seconds of IQ
+TAP_JOIN_TIMEOUT = 15.0  # finalising a recording (waterfall render) runs on the tap thread
+
+
+class Tap:
+    """A bounded stream of raw blocks for one consumer, drained on its own thread.
+
+    `gen`, `center_hz` and `sample_rate` describe the generation that was current when the tap
+    opened; every block carries its own, so a consumer can tell when the tuning changed."""
+
+    def __init__(self, consumer, on_end, max_blocks: int) -> None:
+        self.consumer = consumer
+        self.on_end = on_end
+        self.queue: queue.Queue = queue.Queue(maxsize=max_blocks)
+        self.closing = threading.Event()
+        self.done = threading.Event()
+        self.dropped = 0
+        self.reason: str | None = None
+        self.thread: threading.Thread | None = None
+        self.gen = 0
+        self.center_hz = 0.0
+        self.sample_rate = 0.0
+
+    def offer(self, item) -> None:
+        if self.closing.is_set():
+            return  # nothing after the end, so a full queue still drains and the thread exits
+        try:
+            self.queue.put_nowait(item)
+        except queue.Full:
+            self.dropped += 1
+
+    def end(self, reason: str) -> None:
+        """Finish after the blocks already queued; the first reason given wins."""
+        if self.reason is None:
+            self.reason = reason
+        self.closing.set()
+        try:
+            self.queue.put_nowait(None)
+        except queue.Full:
+            pass
 
 
 class StateError(ValueError):
@@ -75,6 +115,7 @@ class _Run:
         self.threads: list[threading.Thread] = []
         self.samples = 0  # samples read so far in this run (reader thread only)
         self.prebuf: PreBuffer | None = None
+        self.tap: Tap | None = None
 
 
 class RadioSession:
@@ -103,6 +144,7 @@ class RadioSession:
         self.prebuffer_s = prebuffer_s  # takes effect at the next open()
         self._prebuf: PreBuffer | None = None  # the latest run's buffer; kept after close
         self._gen_meta: tuple[float, float] = (0.0, 0.0)  # (center_hz, sample_rate) of generation _gen
+        self._tap: Tap | None = None
         self.spectrum: Broadcaster[SpectrumFrame] = Broadcaster(maxsize=2)
         self.audio: Broadcaster[AudioChunk] = Broadcaster(maxsize=8)
         self.events: Broadcaster[dict] = Broadcaster(maxsize=64)
@@ -163,6 +205,66 @@ class RadioSession:
         is off or empty. The latest run's buffer is kept after close and after a device loss."""
         prebuf = self._prebuf
         return prebuf.snapshot(seconds) if prebuf is not None else None
+
+    def open_tap(self, consumer, on_end, max_blocks: int | None = None) -> Tap:
+        """Stream every block read from now on to `consumer` on an `sdr-tap` thread.
+
+        consumer(gen, center_hz, sample_rate, index, block) returns None to continue or a reason
+        string to end the tap; on_end(reason) runs once on the tap thread after the last block.
+        The queue holds `max_blocks` blocks (TAP_SECONDS of IQ by default); when the consumer
+        falls further behind, new blocks are dropped and counted in `Tap.dropped`."""
+        with self._lock:
+            run = self._run
+            if run is None or not self._state.running:
+                raise StateError("the radio is not running")
+            if self._tap is not None:
+                raise StateError("a recording is already running")
+            size = max_blocks or max(8, math.ceil(TAP_SECONDS * self._state.sample_rate / self._block))
+            tap = Tap(consumer, on_end, size)
+            tap.gen, (tap.center_hz, tap.sample_rate) = self._gen, self._gen_meta
+            tap.thread = threading.Thread(target=self._tap_loop, args=(tap,), name="sdr-tap", daemon=True)
+            self._tap = run.tap = tap
+        tap.thread.start()
+        return tap
+
+    def close_tap(self, tap: Tap, reason: str = "stopped") -> None:
+        """End the tap after its queued blocks; waits until on_end has run (unless called from
+        the tap thread itself)."""
+        tap.end(reason)
+        if tap.thread is not None and tap.thread is not threading.current_thread():
+            tap.done.wait(TAP_JOIN_TIMEOUT)
+
+    def _tap_loop(self, tap: Tap) -> None:
+        reason = None
+        try:
+            while True:
+                try:
+                    item = tap.queue.get(timeout=0.2)
+                except queue.Empty:
+                    if tap.closing.is_set():
+                        break
+                    continue
+                if item is None:
+                    break
+                reason = tap.consumer(*item)
+                if reason is not None:
+                    break
+        except Exception:
+            log.exception("IQ tap consumer failed")
+            reason = "error"
+        finally:
+            tap.closing.set()  # the reader stops offering blocks
+            with self._lock:
+                if self._tap is tap:
+                    self._tap = None
+                if self._run is not None and self._run.tap is tap:
+                    self._run.tap = None
+            try:
+                tap.on_end(reason or tap.reason or "stopped")
+            except Exception:
+                log.exception("IQ tap end handler failed")
+            finally:
+                tap.done.set()
 
     def open(self, device_id: str, patch: StatePatch | None = None) -> RadioState:
         with self._life:
@@ -235,6 +337,8 @@ class RadioSession:
                 finally:
                     if got:
                         self._dev_lock.release()
+                if run.tap is not None:
+                    self.close_tap(run.tap, "closed")
             if was_running:
                 self._publish_state()
 
@@ -419,6 +523,9 @@ class RadioSession:
             run.samples += block.size
             if run.prebuf is not None:
                 run.prebuf.write(block, gen, center, rate, index)
+            tap = run.tap
+            if tap is not None:
+                tap.offer((gen, center, rate, index, block))
             try:
                 ring.put_nowait((gen, block))
             except queue.Full:
@@ -444,6 +551,8 @@ class RadioSession:
         if not current:  # a newer open()/close() already superseded this run
             return
         self.events.publish({"type": "error", "code": "device_lost", "message": str(exc)})
+        if run.tap is not None:
+            run.tap.end("device_lost")
         self._safe_close(run.device)
         self._publish_state()
 
