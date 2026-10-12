@@ -69,7 +69,7 @@ class SettingsStore:
         """Never fails: a missing, locked or corrupt file gives defaults (with a logged warning)."""
         try:
             data = tomllib.loads(self.path.read_text(encoding="utf-8"))
-            return Settings.model_validate(data)
+            return self._validate_dropping_bad_keys(data)
         except FileNotFoundError:
             return Settings()
         except (tomllib.TOMLDecodeError, ValidationError, UnicodeDecodeError) as exc:
@@ -88,6 +88,22 @@ class SettingsStore:
             log.warning("cannot read settings file %s (%s); using defaults", self.path, exc)
             self._unread_original = True
             return Settings()
+
+    def _validate_dropping_bad_keys(self, data: dict) -> Settings:
+        """Validates `data`; a key with an invalid value is reset to its default (with a warning)
+        and every other key is kept. Raises ValidationError only if that cannot make it valid."""
+        while True:
+            try:
+                return Settings.model_validate(data)
+            except ValidationError as exc:
+                bad = {err["loc"][0] for err in exc.errors() if err["loc"] and err["loc"][0] in data}
+                if not bad:
+                    raise
+                for key in sorted(bad, key=str):
+                    # The value itself is not logged: it may be the access token.
+                    log.warning("settings file %s: invalid value for %r; using its default",
+                                self.path, key)
+                data = {k: v for k, v in data.items() if k not in bad}
 
     def save(self, settings: Settings) -> None:
         if self._unread_original and self.path.exists():

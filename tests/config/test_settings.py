@@ -34,6 +34,27 @@ def test_invalid_value_falls_back_to_defaults(tmp_path):
     assert SettingsStore(path).load() == Settings()
 
 
+def test_one_invalid_value_keeps_every_other_setting(tmp_path, caplog):
+    path = tmp_path / "s.toml"
+    text = 'region = 2\ntheme = "light"\ntoken = "abc"\nprebuffer_s = 90\ncallsign = "ZS6SHZ-1"\n'
+    path.write_text(text, encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        s = SettingsStore(path).load()
+    assert (s.region, s.theme, s.token) == (2, "light", "abc")
+    assert s.prebuffer_s == Settings().prebuffer_s and s.callsign == ""
+    assert "'prebuffer_s'" in caplog.text and "'callsign'" in caplog.text
+    assert path.read_text(encoding="utf-8") == text  # not moved aside
+    assert not (tmp_path / "s.toml.bad").exists()
+
+
+def test_invalid_value_keeps_the_token_through_resolve_token(tmp_path):
+    from qrm_hunter.app import resolve_token
+
+    path = tmp_path / "s.toml"
+    path.write_text('token = "abc"\nprebuffer_s = 90\n', encoding="utf-8")
+    assert resolve_token("0.0.0.0", SettingsStore(path)) == "abc"
+
+
 def test_save_creates_parent_directories(tmp_path):
     store = SettingsStore(tmp_path / "a" / "b" / "s.toml")
     store.save(Settings(theme="light"))
