@@ -28,6 +28,28 @@ class IqSnapshot:
         return self.iq.size / self.sample_rate
 
 
+@dataclass(frozen=True)
+class RawSnapshot:
+    """Like IqSnapshot, but the samples stay interleaved int16 (a quarter of the complex64 size)
+    so that a caller can convert them a chunk at a time."""
+
+    raw: np.ndarray  # interleaved int16 I/Q, oldest first; a copy, not a view of the ring
+    center_hz: float
+    sample_rate: float
+    gen: int
+    t0: float
+    end_index: int
+
+    @property
+    def size(self) -> int:
+        """Complex samples held."""
+        return self.raw.size // 2
+
+    @property
+    def seconds(self) -> float:
+        return self.size / self.sample_rate
+
+
 class PreBuffer:
     """Written by the reader thread, read by request threads. A change of generation, centre or
     rate empties the ring, so one snapshot never mixes samples from two tunings."""
@@ -82,6 +104,12 @@ class PreBuffer:
             self._end_index = index + block.size
 
     def snapshot(self, seconds: float | None = None) -> IqSnapshot | None:
+        snap = self.snapshot_raw(seconds)
+        if snap is None:
+            return None
+        return IqSnapshot(from_ci16(snap.raw), snap.center_hz, snap.sample_rate, snap.gen, snap.t0, snap.end_index)
+
+    def snapshot_raw(self, seconds: float | None = None) -> RawSnapshot | None:
         with self._lock:
             if self._key is None or self._filled == 0:
                 return None
@@ -93,4 +121,4 @@ class PreBuffer:
             else:
                 raw = np.concatenate([self._buf[2 * start:], self._buf[:2 * (start + n - self._cap)]])
             t_end, end_index = self._t_end, self._end_index
-        return IqSnapshot(from_ci16(raw), center, rate, gen, t_end - n / rate, end_index)
+        return RawSnapshot(raw, center, rate, gen, t_end - n / rate, end_index)

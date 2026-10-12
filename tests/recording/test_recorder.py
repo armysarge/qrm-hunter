@@ -1,11 +1,15 @@
 import dataclasses
 import json
+import math
 import threading
+import tracemalloc
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from helpers import join_tap_threads, wait_until
 from qrm_hunter.dsp.extract import RegionError, extract_span
+from qrm_hunter.engine.prebuffer import PreBuffer
 from qrm_hunter.engine.session import RadioSession
 from qrm_hunter.engine.state import StatePatch
 from qrm_hunter.recording import recorder as recorder_mod
@@ -108,9 +112,10 @@ def test_a_buffer_from_the_previous_tuning_is_not_saved(rig, monkeypatch):
     rig.session.open("synthetic")
     wait_buffer(rig.session, 2.2)
     real = rig.session.snapshot_iq
+    real_raw = rig.session.snapshot_raw
     # what the buffer returns between a retune and the first block of the new tuning
-    monkeypatch.setattr(rig.session, "snapshot_iq",
-                        lambda seconds=None: dataclasses.replace(real(seconds), gen=real(seconds).gen - 1))
+    monkeypatch.setattr(rig.session, "snapshot_raw",
+                        lambda seconds=None: dataclasses.replace(real_raw(seconds), gen=real_raw(seconds).gen - 1))
     with pytest.raises(ShortBuffer):
         rig.recorder.snapshot(2.1)
     rig.recorder.start(lead_in_s=2.0)  # starts without the stale lead-in
@@ -240,6 +245,67 @@ def test_the_cap_ends_the_recording_and_counts_the_lead_in(tmp_path, lead_in_s):
     ev = rig.stopped_event()
     assert ev["reason"] == "cap" and ev["recording"]["truncated"] is False
     assert 0.45 <= ev["recording"]["duration_s"] <= 0.5
+
+
+def test_a_lead_in_over_the_cap_keeps_its_newest_samples(tmp_path):
+    # 0.49999 s rounds to one more input sample than the cap allows, so the oldest one is skipped.
+    rig = Rig(tmp_path, max_s=0.49999)
+    rig.session.open("synthetic")
+    wait_buffer(rig.session, 0.6)
+    rig.recorder.start(lead_in_s=2.0)
+    ev = rig.stopped_event()
+    assert ev["reason"] == "cap"
+    first = rig.recorder.last_first_index
+    full = rig.session.snapshot_iq()
+    start = first - (full.end_index - full.iq.size)
+    recorded = load_iq(open_sigmf(rig.store.path(ev["recording"]["id"]) / "iq.sigmf-meta"))
+    assert recorded.size == math.floor(0.49999 * rig.session.state.sample_rate)
+    assert start >= 0 and np.array_equal(recorded, full.iq[start:start + recorded.size])
+
+
+def test_save_streams_the_pre_buffer_instead_of_copying_it_whole(tmp_path):
+    """The peak while saving is the ring's int16 copy plus one chunk, not several complex64 copies."""
+    rate, centre, secs = 2_048_000.0, 7_100_000.0, 8.0
+    pb = PreBuffer(secs)
+    block = (0.1 * np.exp(2j * np.pi * 0.01 * np.arange(1 << 18))).astype(np.complex64)
+    for k in range(int(secs * rate) // block.size + 1):
+        pb.write(block, 1, centre, rate, k * block.size, t_end=100.0 + k * block.size / rate)
+
+    class BufferOnly:
+        snapshot = SimpleNamespace(center_hz=centre, sample_rate=rate)
+        current_generation = (1, centre, rate)
+        prebuffer_s = secs
+        snapshot_raw = staticmethod(pb.snapshot_raw)
+
+    store = RecordingStore(tmp_path / "rec")
+    rec = Recorder(BufferOnly(), lambda: store, lambda: RecordingContext({}, "turbo"), lambda e: None,
+                   free_bytes=lambda _p: 10 * GB)
+    ring = pb._buf.nbytes  # 4 bytes per sample: 64 MB here
+    for lo, hi in ((None, None), (centre - 50_000, centre + 50_000)):
+        tracemalloc.start()
+        try:
+            info = rec.snapshot(secs, lo, hi)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        assert info.duration_s == pytest.approx(secs, abs=0.01)
+        # The int16 copy (one ring) plus about 32 MiB for one 2^20-sample chunk in flight. Holding the
+        # clip whole as complex64 (twice the ring) would already break this bound.
+        assert peak < ring + 48 * 2**20, f"peak {peak / 2**20:.0f} MiB for a {ring / 2**20:.0f} MiB ring"
+
+
+def test_the_lead_in_is_read_as_int16_and_extracted_in_chunks(rig, monkeypatch):
+    rig.session.open("synthetic")
+    wait_buffer(rig.session, 1.2)
+    sizes = []
+    real_process = recorder_mod.SpanExtractor.process
+    monkeypatch.setattr(recorder_mod.SpanExtractor, "process",
+                        lambda self, block: sizes.append(block.size) or real_process(self, block))
+    monkeypatch.setattr(rig.session, "snapshot_iq", lambda seconds=None: pytest.fail("complex64 snapshot taken"))
+    rig.recorder.start(lead_in_s=1.0)
+    assert sizes and max(sizes) <= recorder_mod._LEAD_IN_CHUNK
+    assert sum(sizes) >= 0.9 * rig.session.state.sample_rate  # the lead-in went through process()
+    rig.recorder.stop()
 
 
 def test_device_loss_finalises_a_truncated_file(tmp_path):

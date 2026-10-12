@@ -17,7 +17,7 @@ from ..dsp.spectrum import SpectrumProcessor
 from ..sdr.base import DeviceConfig, DeviceError, DeviceInfo, SdrDevice
 from ..sdr.discovery import create_device
 from .broadcast import Broadcaster
-from .prebuffer import DEFAULT_PREBUFFER_S, IqSnapshot, PreBuffer
+from .prebuffer import DEFAULT_PREBUFFER_S, IqSnapshot, PreBuffer, RawSnapshot
 from .state import AudioChunk, DirectSampling, RadioState, SpectrumFrame, StatePatch, Stats
 
 log = logging.getLogger(__name__)
@@ -205,6 +205,11 @@ class RadioSession:
         is off or empty. The latest run's buffer is kept after close and after a device loss."""
         prebuf = self._prebuf
         return prebuf.snapshot(seconds) if prebuf is not None else None
+
+    def snapshot_raw(self, seconds: float | None = None) -> RawSnapshot | None:
+        """snapshot_iq() with the samples left as interleaved int16, for chunked processing."""
+        prebuf = self._prebuf
+        return prebuf.snapshot_raw(seconds) if prebuf is not None else None
 
     def open_tap(self, consumer, on_end, max_blocks: int | None = None) -> Tap:
         """Stream every block read from now on to `consumer` on an `sdr-tap` thread.

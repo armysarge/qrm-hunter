@@ -7,7 +7,7 @@ import math
 import shutil
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -15,8 +15,9 @@ from pathlib import Path
 
 import numpy as np
 
-from ..dsp.extract import SpanExtractor, extract_span, validate_region
+from ..dsp.extract import SpanExtractor, validate_region
 from ..engine.session import TAP_SECONDS, RadioSession, StateError, Tap, block_size_for
+from ..sdr.sigmf_io import from_ci16
 from .files import SigmfWriter
 from .store import RecordingInfo, RecordingStore
 from .waterfall import write_products
@@ -30,7 +31,7 @@ PROGRESS_S = 1.0
 DEFAULT_LEAD_IN_S = 10.0
 MIN_SNAPSHOT_S = 2.0
 TRUNCATING = frozenset({"device_lost", "low_disk", "closed", "error"})
-_LEAD_IN_CHUNK = 1 << 18  # samples per extractor call while processing the lead-in
+_LEAD_IN_CHUNK = 1 << 18  # samples per extractor call while processing the lead-in (and ci16 conversion)
 
 
 class RecorderError(RuntimeError):
@@ -115,6 +116,17 @@ class Recorder:
 
     def save_iq(self, iq: np.ndarray, rate: float, center_hz: float, t0: float, *, lo_hz: float, hi_hz: float,
                 radio_center_hz: float, end_reason: str = "snapshot") -> RecordingInfo:
+        """`iq` is complex samples, or interleaved int16 I/Q (ci16), which is converted a chunk at a time."""
+        if iq.dtype == np.int16:
+            chunks = (from_ci16(iq[i:i + 2 * _LEAD_IN_CHUNK]) for i in range(0, iq.size, 2 * _LEAD_IN_CHUNK))
+        else:
+            chunks = (iq,)
+        return self._save(chunks, rate, center_hz, t0, lo_hz=lo_hz, hi_hz=hi_hz,
+                          radio_center_hz=radio_center_hz, end_reason=end_reason)
+
+    def _save(self, chunks: Iterable[np.ndarray], rate: float, center_hz: float, t0: float, *, lo_hz: float,
+              hi_hz: float, radio_center_hz: float, end_reason: str = "snapshot") -> RecordingInfo:
+        """Writes a recording from `chunks` of output IQ, which may be produced lazily, one at a time."""
         store = self._store()
         self._check_disk(store.ensure_root())
         ctx = self._context()
@@ -126,7 +138,8 @@ class Recorder:
             self._remove_if_empty(folder)
             raise
         try:
-            writer.write(iq)
+            for chunk in chunks:
+                writer.write(chunk)
         except BaseException:
             self._abandon(store, writer, ctx.colormap)
             raise
@@ -141,16 +154,18 @@ class Recorder:
         validate_region(st.center_hz, st.sample_rate, lo_hz, hi_hz)
         self._check_disk(self._store().ensure_root())
         gen = self._session.current_generation[0]
-        snap = self._session.snapshot_iq(seconds)
+        snap = self._session.snapshot_raw(seconds)
         if snap is None and self._session.prebuffer_s <= 0:
             raise PreBufferOff("the pre-buffer is off; set Pre-buffer seconds in Settings")
         # Right after a retune the buffer can still hold the previous tuning until the first new
         # block lands; that is not data "at this frequency" either.
         if snap is None or snap.gen != gen or snap.seconds < MIN_SNAPSHOT_S:
             raise ShortBuffer("need at least 2 s of data at this frequency")
-        ex = extract_span(snap.iq, snap.sample_rate, snap.center_hz, lo_hz, hi_hz)
-        return self.save_iq(ex.iq, ex.rate, ex.center_hz, snap.t0, lo_hz=ex.lo_hz, hi_hz=ex.hi_hz,
-                            radio_center_hz=snap.center_hz)
+        # The snapshot stays int16 and is converted, extracted and written a chunk at a time, so
+        # the clip never exists as complex64 all at once.
+        ex = SpanExtractor(snap.sample_rate, snap.center_hz, lo_hz, hi_hz)
+        return self._save(ex.process_chunks(snap.raw), ex.out_rate, ex.out_center_hz, snap.t0,
+                          lo_hz=ex.lo_hz, hi_hz=ex.hi_hz, radio_center_hz=snap.center_hz)
 
     # --- Start / Stop ----------------------------------------------------------------------------
     # elapsed_s is the duration of the file so far (lead-in included), so it always matches bytes.
@@ -193,15 +208,10 @@ class Recorder:
                 # The tap records the generation it opened on; a retune since the check above is
                 # caught here rather than mixing two tunings.
                 extractor = SpanExtractor(tap.sample_rate, tap.center_hz, lo_hz, hi_hz)
-                snap = self._session.snapshot_iq(lead) if lead > 0 else None
-                if snap is not None and (snap.gen != tap.gen or snap.iq.size == 0):
+                snap = self._session.snapshot_raw(lead) if lead > 0 else None
+                if snap is not None and (snap.gen != tap.gen or snap.size == 0):
                     snap = None  # the buffer still holds another tuning: start without a lead-in
                 limit = max(1, math.floor(self._max_s * extractor.out_rate))
-                lead_iq = None
-                if snap is not None:
-                    parts = [extractor.process(snap.iq[i:i + _LEAD_IN_CHUNK])
-                             for i in range(0, snap.iq.size, _LEAD_IN_CHUNK)]
-                    lead_iq = np.concatenate(parts)
                 t0 = snap.t0 if snap is not None else time.time()
                 ctx = self._context()
                 folder = store.new_folder(extractor.out_center_hz, datetime.fromtimestamp(t0, UTC))
@@ -214,15 +224,22 @@ class Recorder:
                     raise
                 next_index = None
                 self.last_first_index = None
-                if lead_iq is not None:
-                    first = snap.end_index - snap.iq.size
-                    if lead_iq.size > limit:  # decimation rounding: keep the newest samples
-                        drop = lead_iq.size - limit
-                        lead_iq = lead_iq[drop:]
+                if snap is not None:
+                    # The lead-in stays int16 and is converted, extracted and written a chunk at a
+                    # time. If decimation rounding takes it over the cap, the oldest output samples
+                    # are skipped (they still pass through the extractor, which keeps its state).
+                    first = snap.end_index - snap.size
+                    drop = max(0, extractor.output_count(snap.size) - limit)
+                    if drop:
                         first += round(drop * extractor.in_rate / extractor.out_rate)
-                    writer.write(lead_iq)
+                    for out in extractor.process_chunks(snap.raw, _LEAD_IN_CHUNK):
+                        if drop:
+                            k = min(drop, out.size)
+                            out, drop = out[k:], drop - k
+                        writer.write(out)
                     next_index = snap.end_index
                     self.last_first_index = first
+                    snap = None  # release the int16 copy before live blocks are processed
                 now = self._clock()
                 active = _Active(tap.gen, extractor, writer, store, ctx.colormap, next_index,
                                  next_disk=now + DISK_CHECK_S, next_progress=now + PROGRESS_S, tap=tap, limit=limit)

@@ -71,7 +71,7 @@ from ..recording.store import (
 )
 from ..sdr.base import DeviceError, DeviceInfo
 from ..sdr.discovery import discover
-from ..sdr.sigmf_io import from_ci16, to_ci16
+from ..sdr.sigmf_io import to_ci16
 from .protocol import ClientView, parse_view, render_frame
 
 log = logging.getLogger(__name__)
@@ -489,7 +489,7 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
         clip = latest_live[0]
         if clip is None or clip.result.id != req.analysis_id:
             raise HTTPException(404, "that analysis is no longer available; run Analyse again")
-        info = recording_call(recorder.save_iq, from_ci16(clip.iq16), clip.rate, clip.center_hz, clip.t0,
+        info = recording_call(recorder.save_iq, clip.iq16, clip.rate, clip.center_hz, clip.t0,
                               lo_hz=clip.lo_hz, hi_hz=clip.hi_hz, radio_center_hz=clip.radio_center_hz)
         source = clip.result.source.model_copy(update={"kind": "recording", "recording_id": info.id})
         result = clip.result.model_copy(update={"source": source})

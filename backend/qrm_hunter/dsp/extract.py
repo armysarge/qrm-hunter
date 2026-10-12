@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 import numpy as np
 
+from ..sdr.sigmf_io import from_ci16
 from .demod import Decimator, choose_decimation
 
 RATE_LADDER = (12_500.0, 25_000.0, 50_000.0, 100_000.0, 200_000.0, 400_000.0, 800_000.0)
@@ -83,6 +85,25 @@ class SpanExtractor:
             x = stage.process(x)
         return x
 
+    def process_chunks(self, iq: np.ndarray, chunk: int = _CHUNK) -> Iterator[np.ndarray]:
+        """process() over `iq` a chunk at a time, yielding each output. `iq` is complex samples or
+        interleaved int16 I/Q (ci16); ci16 is converted one chunk at a time, so a long input never
+        exists as complex64 all at once."""
+        if iq.dtype == np.int16:
+            for i in range(0, iq.size, 2 * chunk):
+                yield self.process(from_ci16(iq[i:i + 2 * chunk]))
+        else:
+            x = np.asarray(iq, np.complex64)
+            for i in range(0, x.size, chunk):
+                yield self.process(x[i:i + chunk])
+
+    def output_count(self, n_in: int) -> int:
+        """Samples a new extractor returns for `n_in` input samples, however they are split up."""
+        n = n_in
+        for stage in self._stages:
+            n = -(-n // stage.factor)
+        return n
+
 
 @dataclass(frozen=True)
 class Extracted:
@@ -95,8 +116,8 @@ class Extracted:
 
 def extract_span(iq: np.ndarray, in_rate: float, center_hz: float, lo_hz: float | None = None,
                  hi_hz: float | None = None) -> Extracted:
+    """`iq` is complex samples or interleaved int16 I/Q (see SpanExtractor.process_chunks)."""
     ex = SpanExtractor(in_rate, center_hz, lo_hz, hi_hz)
-    x = np.asarray(iq, np.complex64)
-    parts = [ex.process(x[i:i + _CHUNK]) for i in range(0, x.size, _CHUNK)]
+    parts = list(ex.process_chunks(iq))
     out = np.concatenate(parts) if parts else np.empty(0, np.complex64)
     return Extracted(out, ex.out_rate, ex.out_center_hz, ex.lo_hz, ex.hi_hz)

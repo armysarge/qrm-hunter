@@ -15,6 +15,7 @@ from .. import __version__
 from ..sdr.sigmf_io import to_ci16
 
 NS = "qrm_hunter:"
+_WRITE_CHUNK = 1 << 18  # complex samples converted to ci16 per file write
 FOLDER_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}_[0-9]+k(-[0-9]+)?$")
 
 
@@ -53,9 +54,11 @@ class SigmfWriter:
         return self.samples * 4
 
     def write(self, iq: np.ndarray) -> None:
-        if iq.size:
-            self._fh.write(to_ci16(iq).astype("<i2").tobytes())
-            self.samples += int(iq.size)
+        # Converted a chunk at a time: to_ci16's float temporaries are several times the input.
+        for i in range(0, iq.size, _WRITE_CHUNK):
+            part = iq[i:i + _WRITE_CHUNK]
+            self._fh.write(to_ci16(part).astype("<i2", copy=False).tobytes())
+            self.samples += int(part.size)
 
     def close(self, **final) -> Path:
         if not self._fh.closed:

@@ -20,6 +20,28 @@ def tone(offset_hz, n, amp=0.1, rate=RATE):
     return (amp * np.exp(2j * np.pi * offset_hz * np.arange(n) / rate)).astype(np.complex64)
 
 
+def test_ci16_input_gives_the_same_output_as_complex_input():
+    from qrm_hunter.sdr.sigmf_io import from_ci16, to_ci16
+
+    raw = to_ci16(tone(38_000, (1 << 20) + 12_345) + tone(-200_000, (1 << 20) + 12_345))
+    for lo, hi in ((None, None), (C + 25_000, C + 45_000)):
+        a = extract_span(raw, RATE, C, lo, hi).iq
+        b = extract_span(from_ci16(raw), RATE, C, lo, hi).iq
+        assert a.dtype == np.complex64 and np.array_equal(a, b)
+
+
+@pytest.mark.parametrize("lo, hi", [(None, None), (C + 25_000, C + 45_000), (C - 300_000, C + 100_000)])
+def test_output_count_matches_any_split(lo, hi):
+    rng = np.random.default_rng(3)
+    n = 123_457
+    x = tone(10_000, n)
+    for _ in range(3):
+        ex = SpanExtractor(RATE, C, lo, hi)
+        cuts = np.sort(rng.integers(0, n, 7))
+        got = sum(ex.process(p).size for p in np.split(x, cuts))
+        assert got == SpanExtractor(RATE, C, lo, hi).output_count(n)
+
+
 def peak_hz(x, rate):
     spec = np.abs(np.fft.fftshift(np.fft.fft(x * np.hanning(x.size))))
     return (int(np.argmax(spec)) - x.size // 2) * rate / x.size
