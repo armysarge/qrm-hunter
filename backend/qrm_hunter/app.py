@@ -95,7 +95,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def build_app(args: argparse.Namespace) -> tuple[FastAPI, str | None]:
     store = SettingsStore(args.config)
     token = resolve_token(args.host, store)
-    return create_app(RadioSession(), store, token=token, static_dir=WEB_DIR), token
+    return create_app(RadioSession(), store, token=token, static_dir=WEB_DIR, desktop=not args.serve), token
 
 
 def server_kwargs(args: argparse.Namespace, token: str | None) -> dict:
@@ -152,6 +152,7 @@ def main(argv: list[str] | None = None) -> None:
             return
         # The desktop server has stopped and its lifespan closed the radio session, so rebuild
         # the app for the headless server rather than reusing a closed session.
+        args.serve = True
         app, token = build_app(args)
     print(f"QRM Hunter is running at {ui_url(args.host, args.port, token)}", flush=True)
     uvicorn.run(app, **server_kwargs(args, token))

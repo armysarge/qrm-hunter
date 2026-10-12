@@ -164,3 +164,12 @@ def test_run_desktop_falls_back_without_starting_server_when_webview_missing(mon
     monkeypatch.setitem(sys.modules, "webview", None)  # makes `import webview` raise ImportError
     assert run_desktop(FastAPI(), parse_args(["--port", "7075"])) is False
     assert _FakeServer.instances == []
+
+
+def test_desktop_flag_follows_serve(tmp_path):
+    from fastapi.testclient import TestClient
+
+    for argv, desktop in ([["--serve"], False], [[], True]):
+        app, _ = build_app(parse_args([*argv, "--config", str(tmp_path / "s.toml")]))
+        with TestClient(app, base_url="http://127.0.0.1:7070") as c:
+            assert c.get("/api/app").json()["desktop"] is desktop

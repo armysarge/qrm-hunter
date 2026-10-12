@@ -9,20 +9,24 @@ import secrets
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, WebSocket
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.datastructures import Headers
 from starlette.requests import HTTPConnection
 from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocket as StarletteWebSocket
 
-from ..config.bandplan import bands_for_region
+from .. import __version__
+from ..analysis.features import AnalysisContext, Cancelled, ShortInput
+from ..analysis.rules import user_signatures_path
+from ..analysis.service import ANALYSIS_TIMEOUT_S, Analyser, AnalysisResult, make_check
+from ..config.bandplan import band_at, bands_for_region
 from ..config.memories import (
     MAX_IMPORT_BYTES,
     MAX_MEMORIES,
@@ -40,10 +44,34 @@ from ..config.memories import (
     sorted_memories,
 )
 from ..config.settings import Settings, SettingsPatch, SettingsStore
+from ..dsp.extract import extract_span
 from ..engine.session import RadioSession, StateError
 from ..engine.state import StatePatch
+from ..engine.worker import Busy, JobRunner, TimedOut
+from ..recording.files import NS
+from ..recording.recorder import (
+    MIN_SNAPSHOT_S,
+    AlreadyRecording,
+    LowDisk,
+    NotRecording,
+    NotRunning,
+    PreBufferOff,
+    Recorder,
+    RecorderError,
+    RecordingContext,
+    ShortBuffer,
+)
+from ..recording.store import (
+    RecordingNotFound,
+    RecordingStore,
+    TrashError,
+    default_recordings_dir,
+    resolve_recordings_dir,
+    reveal,
+)
 from ..sdr.base import DeviceError, DeviceInfo
 from ..sdr.discovery import discover
+from ..sdr.sigmf_io import from_ci16, to_ci16
 from .protocol import ClientView, parse_view, render_frame
 
 log = logging.getLogger(__name__)
@@ -60,6 +88,52 @@ npm run build</pre></body>"""
 class OpenRequest(BaseModel):
     device_id: str
     config: StatePatch | None = None
+
+
+class SnapshotRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    seconds: float = Field(10.0, gt=0, le=60)
+    lo_hz: float | None = None
+    hi_hz: float | None = None
+    analysis_id: str | None = None
+
+
+class StartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    lo_hz: float | None = None
+    hi_hz: float | None = None
+    lead_in_s: float | None = Field(None, ge=0, le=60)
+
+
+class RenameRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+
+
+class AnalyseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source: Literal["live", "recording"]
+    seconds: float | None = Field(None, gt=0, le=60)
+    lo_hz: float | None = None
+    hi_hz: float | None = None
+    id: str | None = None
+
+
+RECORDER_STATUS: tuple[tuple[type[RecorderError], int], ...] = (
+    (NotRunning, 409), (AlreadyRecording, 409), (NotRecording, 409),
+    (LowDisk, 507), (ShortBuffer, 422), (PreBufferOff, 422))
+
+
+class LiveClip:
+    """The IQ behind the latest live analysis, kept so it can be saved as a recording."""
+
+    def __init__(self, iq16, rate, center_hz, t0, lo_hz, hi_hz, radio_center_hz, result: AnalysisResult) -> None:
+        self.iq16, self.rate, self.center_hz, self.t0 = iq16, rate, center_hz, t0
+        self.lo_hz, self.hi_hz, self.radio_center_hz, self.result = lo_hz, hi_hz, radio_center_hz, result
+
+
+def dc_inside(radio_center_hz: float | None, lo_hz: float, hi_hz: float) -> float | None:
+    return radio_center_hz if radio_center_hz is not None and lo_hz <= radio_center_hz <= hi_hz else None
 
 
 LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -169,12 +243,22 @@ def _restore_last_session(session: RadioSession, settings: Settings) -> None:
 def create_app(session: RadioSession, store: SettingsStore, *, token: str | None = None,
                static_dir: Path | None = None,
                discover_fn: Callable[[], list[DeviceInfo]] = discover,
-               memory_store: MemoryStore | None = None) -> FastAPI:
+               memory_store: MemoryStore | None = None,
+               desktop: bool = False,
+               analyser: Analyser | None = None,
+               free_bytes: Callable[[object], int] | None = None) -> FastAPI:
 
     settings_lock = threading.Lock()
     memories_lock = threading.Lock()
     if memory_store is None:
         memory_store = MemoryStore(memories_path_for(store.path))
+    signatures_warning: str | None = None
+    if analyser is None:
+        analyser, signatures_warning = Analyser.create(user_signatures_path(store.path))
+        if signatures_warning:
+            log.warning("%s", signatures_warning)
+    runner = JobRunner("analysis")
+    last_live: dict[str, LiveClip] = {}
 
     def save_settings(**changes) -> Settings:
         with settings_lock:
@@ -186,8 +270,9 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
     async def lifespan(_app: FastAPI):
         yield
         try:
-            await run_in_threadpool(session.close)
+            await run_in_threadpool(session.close)  # finalises a running recording
         finally:
+            runner.shutdown()
             await run_in_threadpool(lambda: save_settings(last_tune_hz=int(session.snapshot.tune_hz)))
 
     app = FastAPI(title="QRM Hunter", lifespan=lifespan)
@@ -197,6 +282,48 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
     session.prebuffer_s = app.state.settings.prebuffer_s
     app.state.memories = memory_store.load()
     _restore_last_session(session, app.state.settings)
+
+    def recordings() -> RecordingStore:
+        return RecordingStore(resolve_recordings_dir(app.state.settings.recordings_dir))
+
+    # band_at() also knows the "FM BC" broadcast band (group "BC"); mode may be "WFM"
+    def recording_context() -> RecordingContext:
+        st, s = session.state, app.state.settings
+        band = band_at(st.tune_hz, s.region)
+        meta = {"band": band.name if band else None, "mode": st.mode, "device": st.device_id,
+                "gain_db": st.gain_db, "direct_sampling": st.direct_sampling}
+        if s.callsign:
+            meta["callsign"] = s.callsign
+        return RecordingContext(meta, s.colormap)
+
+    recorder = Recorder(session, recordings, recording_context, session.events.publish, free_bytes=free_bytes)
+
+    def recording_call(fn, *args, **kwargs):
+        """Run a recording operation, turning its errors into readable HTTP errors."""
+        try:
+            return fn(*args, **kwargs)
+        except RecorderError as exc:
+            status = next((code for kind, code in RECORDER_STATUS if isinstance(exc, kind)), 500)
+            raise HTTPException(status, str(exc)) from exc
+        except RecordingNotFound as exc:  # also a recording whose metadata cannot be read
+            raise HTTPException(404, "no such recording") from exc
+        except TrashError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:  # RegionError, a bad name, an unreadable recording
+            raise HTTPException(422, str(exc)) from exc
+        except OSError as exc:
+            root = resolve_recordings_dir(app.state.settings.recordings_dir)
+            raise HTTPException(422, f"cannot use the recordings folder {root}: {exc.strerror or exc}") from exc
+
+    def run_analysis(job) -> AnalysisResult:
+        try:
+            return runner.run(job, ANALYSIS_TIMEOUT_S)
+        except Busy as exc:
+            raise HTTPException(409, "an analysis is already running") from exc
+        except (TimedOut, Cancelled) as exc:
+            raise HTTPException(504, str(exc)) from exc
+        except ShortInput as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     def save_memories(memories: list[Memory]) -> None:
         """Persist, then commit and announce a new memory list (call with memories_lock held).
@@ -353,6 +480,112 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
             save_memories([m for j, m in enumerate(app.state.memories) if j != i])
         return Response(status_code=204)
 
+    # The handlers below are plain functions, so FastAPI runs them in its thread pool: starting a
+    # recording (lead-in), saving, stopping and analysing do file I/O and DSP off the event loop.
+    @api.post("/record/snapshot")
+    def record_snapshot(req: SnapshotRequest) -> dict:
+        if req.analysis_id is None:
+            return recording_call(recorder.snapshot, req.seconds, req.lo_hz, req.hi_hz).model_dump()
+        clip = last_live.get(req.analysis_id)
+        if clip is None:
+            raise HTTPException(404, "that analysis is no longer available; run Analyse again")
+        info = recording_call(recorder.save_iq, from_ci16(clip.iq16), clip.rate, clip.center_hz, clip.t0,
+                              lo_hz=clip.lo_hz, hi_hz=clip.hi_hz, radio_center_hz=clip.radio_center_hz)
+        source = clip.result.source.model_copy(update={"kind": "recording", "recording_id": info.id})
+        result = clip.result.model_copy(update={"source": source})
+        store_ = recordings()
+        recording_call(store_.save_analysis, info.id, result.model_dump_json())
+        session.events.publish({"type": "recordings"})
+        return recording_call(store_.info, info.id).model_dump()
+
+    @api.post("/record/start")
+    def record_start(req: StartRequest) -> dict:
+        return recording_call(recorder.start, req.lo_hz, req.hi_hz, req.lead_in_s)
+
+    @api.post("/record/stop")
+    def record_stop() -> dict:
+        return recording_call(recorder.stop).model_dump()
+
+    @api.get("/record/status")
+    def record_status() -> dict:
+        return recorder.status()
+
+    @api.get("/recordings")
+    def list_recordings() -> list[dict]:
+        return [i.model_dump() for i in recording_call(recordings().list)]
+
+    @api.get("/recordings/{rec_id}/waterfall.png")
+    def recording_waterfall(rec_id: str) -> FileResponse:
+        path = recording_call(recordings().path, rec_id) / "waterfall.png"
+        if not path.is_file():
+            raise HTTPException(404, "this recording has no waterfall image")
+        return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-cache"})
+
+    @api.patch("/recordings/{rec_id}")
+    def rename_recording(rec_id: str, req: RenameRequest) -> dict:
+        info = recording_call(recordings().rename, rec_id, req.name)
+        session.events.publish({"type": "recordings"})
+        return info.model_dump()
+
+    @api.delete("/recordings/{rec_id}", status_code=204)
+    def delete_recording(rec_id: str) -> Response:
+        recording_call(recordings().trash, rec_id)
+        session.events.publish({"type": "recordings"})
+        return Response(status_code=204)
+
+    @api.post("/recordings/{rec_id}/open-folder", status_code=204)
+    def open_recording_folder(rec_id: str) -> Response:
+        if not desktop:
+            raise HTTPException(403, "Open folder is only available in the desktop app")
+        folder = recording_call(recordings().path, rec_id)
+        try:
+            reveal(folder)
+        except OSError as exc:
+            raise HTTPException(500, f"could not open {folder}: {exc.strerror or exc}") from exc
+        return Response(status_code=204)
+
+    @api.post("/analyse")
+    def analyse_route(req: AnalyseRequest) -> dict:
+        mains = app.state.settings.mains_hz
+        if req.source == "live":
+            gen = session.current_generation[0]
+            snap = session.snapshot_iq(req.seconds)
+            if snap is None and session.prebuffer_s <= 0:
+                raise HTTPException(422, "the pre-buffer is off; set Pre-buffer seconds in Settings")
+            if snap is None or snap.gen != gen or snap.seconds < MIN_SNAPSHOT_S:
+                raise HTTPException(422, "need at least 2 s of data at this frequency")
+            ex = recording_call(extract_span, snap.iq, snap.sample_rate, snap.center_hz, req.lo_hz, req.hi_hz)
+            ctx = AnalysisContext(mains_hz=mains, dc_hz=dc_inside(snap.center_hz, ex.lo_hz, ex.hi_hz))
+            result = run_analysis(lambda ev: analyser.analyse(
+                ex.iq, ex.rate, ex.center_hz, ctx, kind="live", lo_hz=ex.lo_hz, hi_hz=ex.hi_hz,
+                check=make_check(ev)))
+            last_live.clear()
+            last_live[result.id] = LiveClip(to_ci16(ex.iq), ex.rate, ex.center_hz, snap.t0, ex.lo_hz, ex.hi_hz,
+                                            snap.center_hz, result)
+            return result.model_dump()
+        if not req.id:
+            raise HTTPException(422, "id is required when analysing a recording")
+        store_ = recordings()
+        iq, rate, center, meta = recording_call(store_.load_iq, req.id)
+        lo = float(meta.get(NS + "lo_hz", center - rate / 2))
+        hi = float(meta.get(NS + "hi_hz", center + rate / 2))
+        ctx = AnalysisContext(mains_hz=mains, dc_hz=dc_inside(meta.get(NS + "radio_center_hz"), lo, hi))
+        result = run_analysis(lambda ev: analyser.analyse(
+            iq, rate, center, ctx, kind="recording", lo_hz=lo, hi_hz=hi, recording_id=req.id,
+            check=make_check(ev)))
+        try:
+            store_.save_analysis(req.id, result.model_dump_json())
+            session.events.publish({"type": "recordings"})
+        except OSError as exc:
+            log.warning("could not save the analysis of %s: %s", req.id, exc)
+        return result.model_dump()
+
+    @api.get("/app")
+    def app_info() -> dict:
+        return {"version": __version__, "desktop": desktop, "recordings_dir": str(recordings().root),
+                "default_recordings_dir": str(default_recordings_dir()), "ranker": analyser.ranker_status,
+                "signatures_warning": signatures_warning}
+
     app.include_router(api)
 
     @app.websocket("/ws/spectrum")
@@ -420,6 +653,8 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
 
         async def send() -> None:
             await ws.send_json({"type": "state", "state": session.snapshot.model_dump()})
+            if signatures_warning:
+                await ws.send_json({"type": "error", "code": "signatures", "message": signatures_warning})
             rds = session.rds
             if rds is not None:
                 await ws.send_json({"type": "rds", "rds": rds})

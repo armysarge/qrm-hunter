@@ -80,7 +80,7 @@ class RecordingStore:
         raise OSError(f"too many recordings named {base}")
 
     def path(self, rec_id: str) -> Path:
-        if not FOLDER_RE.match(rec_id):
+        if not FOLDER_RE.fullmatch(rec_id):
             raise RecordingNotFound(rec_id)
         folder = self.root / rec_id
         if not (folder / "iq.sigmf-meta").is_file():
@@ -88,17 +88,30 @@ class RecordingStore:
         return folder
 
     def _read_meta(self, folder: Path) -> dict:
-        return json.loads((folder / "iq.sigmf-meta").read_text(encoding="utf-8"))
+        """The parsed metadata; a file that cannot be read or is not a JSON object is not a recording."""
+        try:
+            doc = json.loads((folder / "iq.sigmf-meta").read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:  # JSONDecodeError and UnicodeDecodeError are ValueErrors
+            raise RecordingNotFound(f"{folder.name}: unreadable metadata ({exc})") from exc
+        if not isinstance(doc, dict) or not isinstance(doc.get("global"), dict):
+            raise RecordingNotFound(f"{folder.name}: malformed SigMF metadata")
+        return doc
 
     def info(self, rec_id: str) -> RecordingInfo:
         folder = self.path(rec_id)
         doc = self._read_meta(folder)
-        # hand-edited or foreign metadata: anything but the expected shapes is "not a recording"
-        g = doc.get("global") if isinstance(doc, dict) else None
-        captures = doc.get("captures") if isinstance(doc, dict) else None
+        try:
+            return self._build_info(rec_id, folder, doc)
+        except (KeyError, TypeError, ValueError, IndexError) as exc:
+            # hand-edited or foreign metadata: anything but the expected shapes is "not a recording"
+            raise RecordingNotFound(f"{rec_id}: malformed SigMF metadata ({exc!r})") from exc
+
+    def _build_info(self, rec_id: str, folder: Path, doc: dict) -> RecordingInfo:
+        g = doc["global"]
+        captures = doc.get("captures")
         cap = captures[0] if isinstance(captures, list) and captures else {}
-        if not isinstance(g, dict) or not isinstance(cap, dict):
-            raise ValueError(f"{rec_id}: malformed SigMF metadata")
+        if not isinstance(cap, dict):
+            raise TypeError("captures[0] is not an object")
         rate = float(g["core:sample_rate"])
         centre = float(cap.get("core:frequency", 0.0))
         lo = float(g.get(NS + "lo_hz", centre - rate / 2))
@@ -125,7 +138,7 @@ class RecordingStore:
             return []
         out = []
         for entry in self.root.iterdir():
-            if not entry.is_dir() or not FOLDER_RE.match(entry.name):
+            if not entry.is_dir() or not FOLDER_RE.fullmatch(entry.name):
                 continue
             try:
                 out.append(self.info(entry.name))
@@ -159,16 +172,20 @@ class RecordingStore:
 
     def load_iq(self, rec_id: str, max_seconds: float = 60.0) -> tuple[np.ndarray, float, float, dict]:
         folder = self.path(rec_id)
+        self.info(rec_id)  # a recording whose metadata cannot be interpreted is not found
+        meta = self._read_meta(folder)
         try:
             rec = open_sigmf(folder / "iq.sigmf-meta")
         except DeviceError as exc:
             raise ValueError(str(exc)) from exc
+        except (KeyError, TypeError) as exc:
+            raise RecordingNotFound(f"{rec_id}: malformed SigMF metadata ({exc!r})") from exc
         n = min(rec.num_samples, int(max_seconds * rec.sample_rate))
         if rec.datatype == "ci16_le":
             iq = from_ci16(np.fromfile(rec.data_path, dtype="<i2", count=2 * n))
         else:
             iq = np.asarray(load_iq(rec)[:n], np.complex64)
-        return iq, rec.sample_rate, rec.center_hz, self._read_meta(folder)["global"]
+        return iq, rec.sample_rate, rec.center_hz, meta["global"]
 
 
 def reveal(path: Path) -> None:
