@@ -12,7 +12,7 @@ import type { PlotInteractionOptions } from "./interact";
 import { byFrequency, openConfig, recallPatch } from "./memories";
 import { selectBand } from "./bands";
 import { taSnackbar, type TaSnack } from "./rds";
-import { initialRecord, type RecordUi } from "./recording";
+import { clampSeconds, initialRecord, type RecordUi } from "./recording";
 import { regionBetween, type Region, type SpanChoice } from "./region";
 import type {
   AppInfo, Band, DeviceInfo, Memory, MemoryFields, Mode, RadioState, RdsState, RecordingInfo, Settings, SettingsPatch,
@@ -311,6 +311,8 @@ export async function applyAutoRange(): Promise<void> {
 export async function saveSettings(patch: SettingsPatch): Promise<void> {
   try {
     app.settings = await patchSettings(patch);
+    // "Save last N s" can never exceed the pre-buffer, so follow a changed length.
+    app.recordSeconds = clampSeconds(app.recordSeconds, app.settings.prebuffer_s);
   } catch (e) {
     fail(e);
   }

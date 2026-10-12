@@ -10,10 +10,12 @@
   import MemoriesDrawer from "./components/MemoriesDrawer.svelte";
   import MemoryDialog from "./components/MemoryDialog.svelte";
   import AnalysisPanel from "./components/AnalysisPanel.svelte";
+  import RecordingsDrawer from "./components/RecordingsDrawer.svelte";
+  import SettingsDialog from "./components/SettingsDialog.svelte";
   import RdsCard from "./components/RdsCard.svelte";
   import TaSnackbar from "./components/TaSnackbar.svelte";
   import {
-    app, fullSpan, noteFrame, noteRds, reconcileAudio, recallMemory, refreshDevices, refreshMemories, refreshRecordings, retune, isRetuneTune, tuneRadio,
+    app, fullSpan, noteFrame, noteRds, reconcileAudio, recallMemory, refreshDevices, refreshMemories, retune, isRetuneTune, tuneRadio,
     viewLimit,
   } from "./lib/store.svelte";
   import { memoryKey } from "./lib/memories";
@@ -24,6 +26,7 @@
   import { clampView, snapHz } from "./lib/freq";
   import { clampSplit, loadSplit } from "./lib/split";
   import { closeAnalysis, saveAnalysedClip } from "./lib/analysis-actions";
+  import { refreshAppInfo, refreshRecordings } from "./lib/recordings-actions";
   import { onRecordEvent, syncRecordStatus } from "./lib/record-actions";
   import { clampSeconds } from "./lib/recording";
   import { keepRegion } from "./lib/region";
@@ -85,6 +88,7 @@
         app.radio = state;
         if (rds && !app.rds) noteRds(rds); // the events socket may already have sent a newer one
         await Promise.all([refreshDevices(), refreshMemories()]);
+        void refreshAppInfo();
         const last = settings.last_device_id;
         if (last && app.devices.some((d) => d.id === last)) app.selectedDevice = last;
       } catch (e) {
@@ -164,9 +168,14 @@
       app.spanChoice = "visible";
       return;
     }
-    if (e.key === "Escape" && app.analysisOpen && !app.region && !document.querySelector("[role=menu]")) {
-      closeAnalysis();
-      return;
+    if (e.key === "Escape" && !app.region && !document.querySelector("[role=menu]")) {
+      // One right-hand panel is open at a time; Esc closes whichever it is.
+      if (app.analysisOpen || app.recordingsOpen || app.memoriesOpen) {
+        if (app.analysisOpen) closeAnalysis();
+        else if (app.recordingsOpen) app.recordingsOpen = false;
+        else app.memoriesOpen = false;
+        return;
+      }
     }
     const mk = memoryKey(e, false);
     if (mk?.kind === "save" && app.radio) {
@@ -205,6 +214,8 @@
   </main>
   {#if app.analysisOpen}
     <AnalysisPanel ui={app.analysis} onclose={closeAnalysis} onsave={saveAnalysedClip} />
+  {:else if app.recordingsOpen}
+    <RecordingsDrawer />
   {:else if app.memoriesOpen}
     <MemoriesDrawer />
   {/if}
@@ -212,6 +223,7 @@
   <ErrorBanner />
   <TaSnackbar />
   {#if app.memoryDialog}<MemoryDialog />{/if}
+  {#if app.settingsOpen}<SettingsDialog />{/if}
 </div>
 
 <style>

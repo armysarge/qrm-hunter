@@ -2,6 +2,7 @@
   import FrequencyDisplay from "./FrequencyDisplay.svelte";
   import RecordButton from "./RecordButton.svelte";
   import { analyseLive } from "../lib/analysis-actions";
+  import { toggleRecordings } from "../lib/recordings-actions";
   import { app, player, refreshDevices, setRadio, startStop, toggleAudio } from "../lib/store.svelte";
   import { BW_OPTIONS, STEP_OPTIONS } from "../lib/freq";
   import type { DirectSampling, Mode } from "../lib/types";
@@ -101,6 +102,13 @@
       onclick={() => { app.memoriesOpen = !app.memoriesOpen; app.analysisOpen = false; app.recordingsOpen = false; }}>
       <span class="material-symbols-rounded" aria-hidden="true">bookmarks</span><span class="mem-label">Memories</span>
     </button>
+    <button class="memories" class:on={app.recordingsOpen} aria-pressed={app.recordingsOpen} title="Saved recordings" aria-label="Recordings"
+      onclick={toggleRecordings}>
+      <span class="material-symbols-rounded" aria-hidden="true">folder_special</span><span class="mem-label">Recordings</span>
+    </button>
+    <button class="icon" title="Settings" aria-label="Settings" onclick={() => (app.settingsOpen = true)}>
+      <span class="material-symbols-rounded" aria-hidden="true">settings</span>
+    </button>
     <button class="listen" class:on={app.audioOn} aria-pressed={app.audioOn} disabled={!running || app.audioBusy} onclick={toggleAudio}>
       <span class="material-symbols-rounded" aria-hidden="true">{app.audioOn ? "volume_off" : "volume_up"}</span>
       {app.audioOn ? "Mute" : "Listen"}
@@ -154,7 +162,9 @@
     .brand { display: none; }
     .hero { justify-content: flex-start; }
     .device { justify-self: end; }
-    /* Memories becomes an icon button so the Record button fits on the first row. */
+  }
+  /* The panel buttons become icon buttons so the frequency display keeps its room on the first row. */
+  @media (max-width: 2099px) {
     .mem-label, .an-label { display: none; }
     .memories, .analyse { width: 40px; padding: 0; }
   }
@@ -209,5 +219,11 @@
   /* Six modes must fit a 375 px phone (after the .seg rules so it wins). */
   @media (max-width: 760px) {
     .seg button { min-width: 0; padding: 0 10px; gap: 4px; }
+  }
+
+  /* Below the wide layout the first row also carries the panel buttons, so the device select and volume are narrower. */
+  @media (max-width: 1599px) {
+    .device select { width: 168px; }
+    .vol { width: 64px; }
   }
 </style>
