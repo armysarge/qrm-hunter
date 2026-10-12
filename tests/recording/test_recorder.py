@@ -1,10 +1,10 @@
 import dataclasses
 import json
 import threading
-import time
 
 import numpy as np
 import pytest
+from helpers import join_tap_threads, wait_until
 from qrm_hunter.dsp.extract import RegionError, extract_span
 from qrm_hunter.engine.session import RadioSession
 from qrm_hunter.engine.state import StatePatch
@@ -26,23 +26,6 @@ from qrm_hunter.sdr.synthetic import SyntheticDevice
 
 GB = 1024 ** 3
 RIGS = []
-
-
-def wait_until(condition, timeout=10.0, interval=0.02):
-    deadline = time.monotonic() + timeout
-    while not (value := condition()) and time.monotonic() < deadline:
-        time.sleep(interval)
-    return value
-
-
-def tap_threads():
-    return [t for t in threading.enumerate() if t.name == "sdr-tap" and t.is_alive()]
-
-
-def join_tap_threads():
-    for t in tap_threads():
-        t.join(10.0)
-    return tap_threads()
 
 
 class Rig:
@@ -199,6 +182,16 @@ def test_one_recording_at_a_time_and_stop_when_idle(rig):
     assert rig.recorder.stop().end_reason == "stopped"
 
 
+def test_a_tap_still_finishing_reads_as_already_recording(rig):
+    rig.session.open("synthetic")
+    tap = rig.session.open_tap(lambda *block: None, lambda reason: None)
+    try:
+        with pytest.raises(AlreadyRecording):
+            rig.recorder.start(lead_in_s=0)
+    finally:
+        rig.session.close_tap(tap)
+
+
 def test_low_disk_refuses_to_start(tmp_path):
     rig = Rig(tmp_path, free=100 * 1024 ** 2)
     rig.session.open("synthetic")
@@ -221,27 +214,31 @@ def test_low_disk_during_recording_stops_it(tmp_path, monkeypatch):
     assert ev["reason"] == "low_disk" and ev["recording"]["truncated"] is True
 
 
-def test_the_cap_ends_the_recording(tmp_path):
+@pytest.mark.parametrize("lead_in_s", [0, 0.3, 2.0])
+def test_the_cap_ends_the_recording_and_counts_the_lead_in(tmp_path, lead_in_s):
     rig = Rig(tmp_path, max_s=0.5)
     rig.session.open("synthetic")
-    rig.recorder.start(lead_in_s=0)
+    wait_buffer(rig.session, lead_in_s)
+    rig.recorder.start(lead_in_s=lead_in_s)
     ev = rig.stopped_event()
     assert ev["reason"] == "cap" and ev["recording"]["truncated"] is False
+    assert 0.45 <= ev["recording"]["duration_s"] <= 0.5
 
 
 def test_device_loss_finalises_a_truncated_file(tmp_path):
-    class Failing(SyntheticDevice):
-        reads = 0
+    unplug = threading.Event()  # set once recording, so the loss cannot beat start()
 
+    class Failing(SyntheticDevice):
         def read(self, n):
-            Failing.reads += 1
-            if Failing.reads > 30:
+            if unplug.is_set():
                 raise DeviceError("unplugged")
             return super().read(n)
 
     rig = Rig(tmp_path, device=Failing(realtime=True))
     rig.session.open("synthetic")
     rig.recorder.start(lead_in_s=0)
+    assert wait_until(lambda: rig.recorder.status()["bytes"] > 0)
+    unplug.set()
     ev = rig.stopped_event()
     assert ev["reason"] == "device_lost"
     info = rig.store.info(ev["recording"]["id"])

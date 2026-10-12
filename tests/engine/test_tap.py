@@ -1,7 +1,7 @@
 import threading
-import time
 
 import pytest
+from helpers import join_tap_threads, wait_until
 from qrm_hunter.engine.session import RadioSession, StateError
 from qrm_hunter.engine.state import StatePatch
 from qrm_hunter.sdr.base import DeviceError
@@ -10,17 +10,6 @@ from qrm_hunter.sdr.synthetic import SyntheticDevice
 
 def factory(_id):
     return SyntheticDevice(realtime=True)
-
-
-def wait_until(condition, timeout=10.0, interval=0.02):
-    deadline = time.monotonic() + timeout
-    while not (value := condition()) and time.monotonic() < deadline:
-        time.sleep(interval)
-    return value
-
-
-def tap_threads():
-    return [t for t in threading.enumerate() if t.name == "sdr-tap" and t.is_alive()]
 
 
 @pytest.fixture(autouse=True)
@@ -37,9 +26,7 @@ def _close_every_session(monkeypatch):
     yield
     for s in made:
         s.close()
-    for t in tap_threads():
-        t.join(10.0)
-    assert tap_threads() == []
+    assert join_tap_threads() == []
 
 
 class Collector:
@@ -100,12 +87,11 @@ def test_close_and_device_loss_end_the_tap():
     s.close()
     assert c.ended.wait(10) and c.reason == "closed"
 
-    class Failing(SyntheticDevice):
-        reads = 0
+    unplug = threading.Event()  # set once the tap is open, so the loss cannot beat open_tap()
 
+    class Failing(SyntheticDevice):
         def read(self, n):
-            Failing.reads += 1
-            if Failing.reads > 8:
+            if unplug.is_set():
                 raise DeviceError("unplugged")
             return super().read(n)
 
@@ -113,6 +99,7 @@ def test_close_and_device_loss_end_the_tap():
     s2.open("synthetic")
     c2 = Collector()
     s2.open_tap(c2.consume, c2.on_end)
+    unplug.set()
     assert c2.ended.wait(10) and c2.reason == "device_lost"
 
 
@@ -131,7 +118,8 @@ def test_a_full_queue_still_ends_and_counts_drops():
     tap.end("stopped")
     release.set()
     assert c.ended.wait(10) and c.reason == "stopped"
-    assert 1 <= len(c.blocks) <= 3  # the block in hand plus the queued ones, nothing after the end
+    # the block in hand plus the queued ones, and at most one a reader offered just before the end
+    assert 1 <= len(c.blocks) <= 4
 
 
 def test_a_failing_consumer_ends_the_tap_with_error():

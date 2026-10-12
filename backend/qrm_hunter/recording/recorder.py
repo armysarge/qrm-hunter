@@ -63,6 +63,7 @@ class _Active:
     next_disk: float
     next_progress: float
     tap: Tap
+    limit: int  # output samples allowed in the file (max_s, lead-in included)
     gaps: int = 0
     info: RecordingInfo | None = None
     error: str | None = None
@@ -173,6 +174,7 @@ class Recorder:
             _, center, rate = self._session.current_generation
             validate_region(center, rate, lo_hz, hi_hz)
             lead = DEFAULT_LEAD_IN_S if lead_in_s is None else max(0.0, float(lead_in_s))
+            lead = min(lead, self._max_s)  # the lead-in counts toward the cap
             # The tap opens before the lead-in snapshot so that no block falls between the two. Its
             # consumer waits on self._lock, so live blocks queue up until the lead-in is written;
             # the queue is sized to hold them meanwhile.
@@ -181,6 +183,9 @@ class Recorder:
             try:
                 tap = self._session.open_tap(partial(self._consume, slot), partial(self._on_end, slot), max_blocks)
             except StateError as exc:
+                # The radio is running but a previous tap is still finishing its file.
+                if self._session.state.running:
+                    raise AlreadyRecording("a recording is still being finished") from None
                 raise NotRunning(str(exc)) from None
             writer = None
             ctx = None
@@ -191,6 +196,7 @@ class Recorder:
                 snap = self._session.snapshot_iq(lead) if lead > 0 else None
                 if snap is not None and (snap.gen != tap.gen or snap.iq.size == 0):
                     snap = None  # the buffer still holds another tuning: start without a lead-in
+                limit = max(1, math.floor(self._max_s * extractor.out_rate))
                 lead_iq = None
                 if snap is not None:
                     parts = [extractor.process(snap.iq[i:i + _LEAD_IN_CHUNK])
@@ -209,12 +215,17 @@ class Recorder:
                 next_index = None
                 self.last_first_index = None
                 if lead_iq is not None:
+                    first = snap.end_index - snap.iq.size
+                    if lead_iq.size > limit:  # decimation rounding: keep the newest samples
+                        drop = lead_iq.size - limit
+                        lead_iq = lead_iq[drop:]
+                        first += round(drop * extractor.in_rate / extractor.out_rate)
                     writer.write(lead_iq)
                     next_index = snap.end_index
-                    self.last_first_index = snap.end_index - snap.iq.size
+                    self.last_first_index = first
                 now = self._clock()
                 active = _Active(tap.gen, extractor, writer, store, ctx.colormap, next_index, started=now,
-                                 next_disk=now + DISK_CHECK_S, next_progress=now + PROGRESS_S, tap=tap)
+                                 next_disk=now + DISK_CHECK_S, next_progress=now + PROGRESS_S, tap=tap, limit=limit)
                 slot.active = self._active = active
             except BaseException:
                 tap.end("error")  # no wait: the consumer is blocked on self._lock until we return
@@ -267,10 +278,13 @@ class Recorder:
         else:
             self.last_first_index = index
         a.next_index = index + block.size
-        a.writer.write(a.extractor.process(block))
-        now = self._clock()
-        if now - a.started >= self._max_s:
+        out = a.extractor.process(block)
+        room = a.limit - a.writer.samples
+        if out.size >= room:  # the cap is counted in samples, so the file never runs over max_s
+            a.writer.write(out[:room])
             return "cap"
+        a.writer.write(out)
+        now = self._clock()
         if now >= a.next_disk:
             a.next_disk = now + DISK_CHECK_S
             if self._free(a.store.root) < MIN_FREE_BYTES:
