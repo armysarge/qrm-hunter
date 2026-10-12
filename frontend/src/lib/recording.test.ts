@@ -61,9 +61,14 @@ describe("labels", () => {
     expect(primaryLabel(initialRecord(), 10)).toBe("Save last 10 s");
     expect(primaryLabel(run([{ type: "save" }]), 10)).toBe("Saving…");
     expect(primaryLabel(run([{ type: "progress", elapsedS: 65, bytes: 3_250_000 }]), 10)).toBe("1:05 · 3.1 MB");
+    // a recording started with a 10 s lead-in already holds 10 s of data
+    expect(primaryLabel(run([{ type: "start" }, { type: "started", status: status(true, 10.02, 16_384_000) }]), 10))
+      .toBe("0:10 · 15.6 MB");
   });
   it("clamps the seconds to the pre-buffer", () => {
     expect(clampSeconds(30, 10)).toBe(10);
+    expect(clampSeconds(99, 10)).toBe(10); // typed over a state that is already 10
+    expect(clampSeconds(0, 10)).toBe(2);
     expect(clampSeconds(1, 10)).toBe(2);
     expect(clampSeconds(7.6, 60)).toBe(8);
     expect(clampSeconds(Number.NaN, 10)).toBe(10);

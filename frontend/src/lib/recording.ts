@@ -39,7 +39,7 @@ export function recordReducer(s: RecordUi, a: RecordAction): RecordUi {
       }
       return s.phase === "recording" || s.phase === "stopping" ? { ...s, phase: "idle", elapsedS: 0, bytes: 0 } : s;
     case "failed":
-      return { ...s, phase: s.phase === "stopping" ? "recording" : s.phase === "recording" ? "recording" : "idle" };
+      return { ...s, phase: s.phase === "stopping" || s.phase === "recording" ? "recording" : "idle" };
   }
 }
 

@@ -59,7 +59,6 @@ class _Active:
     store: RecordingStore
     colormap: str
     next_index: int | None
-    started: float
     next_disk: float
     next_progress: float
     tap: Tap
@@ -154,12 +153,13 @@ class Recorder:
                             radio_center_hz=snap.center_hz)
 
     # --- Start / Stop ----------------------------------------------------------------------------
+    # elapsed_s is the duration of the file so far (lead-in included), so it always matches bytes.
 
     def status(self) -> dict:
         a = self._active
         if a is None:
             return {"recording": False, "elapsed_s": 0.0, "bytes": 0, "id": None}
-        return {"recording": True, "elapsed_s": self._clock() - a.started, "bytes": a.writer.bytes,
+        return {"recording": True, "elapsed_s": _recorded_s(a), "bytes": a.writer.bytes,
                 "id": a.writer.folder.name}
 
     def start(self, lo_hz: float | None = None, hi_hz: float | None = None,
@@ -224,7 +224,7 @@ class Recorder:
                     next_index = snap.end_index
                     self.last_first_index = first
                 now = self._clock()
-                active = _Active(tap.gen, extractor, writer, store, ctx.colormap, next_index, started=now,
+                active = _Active(tap.gen, extractor, writer, store, ctx.colormap, next_index,
                                  next_disk=now + DISK_CHECK_S, next_progress=now + PROGRESS_S, tap=tap, limit=limit)
                 slot.active = self._active = active
             except BaseException:
@@ -292,7 +292,7 @@ class Recorder:
         if now >= a.next_progress:
             # keep a steady cadence, but after a stall restart from now instead of catching up
             a.next_progress = (a.next_progress if now - a.next_progress < PROGRESS_S else now) + PROGRESS_S
-            self._publish({"type": "recording", "elapsed_s": round(now - a.started, 1), "bytes": a.writer.bytes})
+            self._publish({"type": "recording", "elapsed_s": round(_recorded_s(a), 1), "bytes": a.writer.bytes})
         return None
 
     def _on_end(self, slot: _Slot, reason: str) -> None:
@@ -312,3 +312,8 @@ class Recorder:
         self._publish({"type": "recording_stopped", "reason": reason,
                        "recording": a.info.model_dump() if a.info else None, "error": a.error})
         self._publish({"type": "recordings"})
+
+
+def _recorded_s(a: "_Active") -> float:
+    """Seconds of IQ written to the file so far, lead-in included."""
+    return a.writer.samples / a.extractor.out_rate

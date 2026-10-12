@@ -168,6 +168,23 @@ def test_progress_events_and_status(rig):
     assert rig.stopped_event()["reason"] == "stopped"
 
 
+def test_elapsed_is_the_recorded_duration_including_the_lead_in(rig):
+    rig.session.open("synthetic")
+    wait_buffer(rig.session, 1.2)
+    status = rig.recorder.start(lead_in_s=1.0)
+    assert status["elapsed_s"] >= 0.9  # the lead-in is already in the file
+    assert status["elapsed_s"] == pytest.approx(status["bytes"] / 4 / rig.session.state.sample_rate)
+
+    def progress():
+        return [e for e in rig.events if e["type"] == "recording"]
+
+    assert wait_until(lambda: progress())
+    ev = progress()[-1]
+    assert ev["elapsed_s"] >= 1.9  # lead-in plus at least one second of live data
+    assert ev["elapsed_s"] == pytest.approx(ev["bytes"] / 4 / rig.session.state.sample_rate, abs=0.05)
+    rig.recorder.stop()
+
+
 def test_one_recording_at_a_time_and_stop_when_idle(rig):
     with pytest.raises(NotRunning):
         rig.recorder.start()

@@ -24,6 +24,11 @@
     if (recording) void stopRecording();
     else void startRecording();
   }
+  function setSeconds(e: Event & { currentTarget: HTMLInputElement }) {
+    app.recordSeconds = clampSeconds(Number(e.currentTarget.value), prebuffer);
+    // When the clamp leaves the state unchanged nothing re-renders, so show the clamped value here.
+    e.currentTarget.value = String(app.recordSeconds);
+  }
   function onWindowClick(e: MouseEvent) {
     if (menuOpen && !(e.target as HTMLElement).closest(".record")) menuOpen = false;
   }
@@ -35,7 +40,7 @@
 <svelte:window onclick={onWindowClick} onkeydown={onWindowKey} />
 
 <div class="record" class:live={recording}>
-  <button class="primary" disabled={!running || busy || (!recording && prebuffer <= 0)} title={primaryTitle} onclick={primary}>
+  <button class="primary" disabled={(!running && !recording) || busy || (!recording && prebuffer <= 0)} title={primaryTitle} onclick={primary}>
     {#if recording}<span class="dot" aria-hidden="true"></span>{:else}<span class="material-symbols-rounded" aria-hidden="true">save</span>{/if}
     <span class="num">{primaryLabel(app.record, app.recordSeconds)}</span>
   </button>
@@ -45,7 +50,7 @@
   </button>
   {#if menuOpen}
     <div class="menu" role="menu">
-      <button role="menuitem" disabled={!running || busy} onclick={toggleRecording}>
+      <button role="menuitem" disabled={(!running && !recording) || busy} onclick={toggleRecording}>
         <span class="material-symbols-rounded" aria-hidden="true">{recording ? "stop_circle" : "fiber_manual_record"}</span>
         {recording ? "Stop recording" : "Start recording"}
       </button>
@@ -59,7 +64,7 @@
       <label class="secs">
         <span class="label-sm">Seconds to save</span>
         <input type="number" min="2" max={Math.max(2, prebuffer)} step="1" value={app.recordSeconds}
-          onchange={(e) => (app.recordSeconds = clampSeconds(Number(e.currentTarget.value), prebuffer))} />
+          onchange={setSeconds} />
       </label>
       <p class="label-sm hint num">{describeSpan(span.lo_hz, span.hi_hz)}</p>
     </div>
