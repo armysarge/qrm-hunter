@@ -1,5 +1,8 @@
 """Small polling helpers shared by the engine and recording tests."""
 
+import concurrent.futures
+import contextlib
+import sys
 import threading
 import time
 
@@ -21,3 +24,20 @@ def join_tap_threads(timeout=10.0):
     for t in tap_threads():
         t.join(timeout)
     return tap_threads()
+
+
+@contextlib.contextmanager
+def ws_connect(client, url, **kwargs):
+    """TestClient.websocket_connect, minus the exit-time CancelledError the client can raise when
+    the handler has not finished unwinding yet on a busy machine."""
+    session = client.websocket_connect(url, **kwargs)
+    ws = session.__enter__()
+    try:
+        yield ws
+    except BaseException:
+        info = sys.exc_info()
+        with contextlib.suppress(concurrent.futures.CancelledError):
+            session.__exit__(*info)
+        raise
+    with contextlib.suppress(concurrent.futures.CancelledError):
+        session.__exit__(None, None, None)

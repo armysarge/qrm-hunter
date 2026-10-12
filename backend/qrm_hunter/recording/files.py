@@ -15,7 +15,7 @@ from .. import __version__
 from ..sdr.sigmf_io import to_ci16
 
 NS = "qrm_hunter:"
-FOLDER_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}_[0-9]+k(-[0-9]+)?")
+FOLDER_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}_[0-9]+k(-[0-9]+)?$")
 
 
 def folder_name(center_hz: float, when: datetime) -> str:

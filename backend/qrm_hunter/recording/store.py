@@ -113,6 +113,8 @@ class RecordingStore:
         if not isinstance(cap, dict):
             raise TypeError("captures[0] is not an object")
         rate = float(g["core:sample_rate"])
+        if NS + "radio_center_hz" in g:
+            float(g[NS + "radio_center_hz"])  # must be numeric; analysis reads it later
         centre = float(cap.get("core:frequency", 0.0))
         lo = float(g.get(NS + "lo_hz", centre - rate / 2))
         hi = float(g.get(NS + "hi_hz", centre + rate / 2))

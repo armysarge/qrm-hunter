@@ -1,14 +1,11 @@
-import concurrent.futures
-import contextlib
 import shutil
-import sys
 import threading
 import time
 
 import pytest
 from fastapi.testclient import TestClient
 
-from helpers import wait_until
+from helpers import wait_until, ws_connect
 
 from qrm_hunter.analysis.service import AnalysisResult, AnalysisSource
 from qrm_hunter.api import server as server_mod
@@ -20,23 +17,6 @@ from qrm_hunter.sdr.synthetic import SYNTHETIC_INFO, SyntheticDevice
 
 BASE = "http://127.0.0.1:7070"
 WS = "ws://127.0.0.1:7070"  # a loopback Host, as RequestGuard requires without a token
-
-
-@contextlib.contextmanager
-def ws_connect(client, url, **kwargs):
-    """TestClient.websocket_connect, minus the exit-time CancelledError the client can raise when
-    the handler has not finished unwinding yet on a busy machine."""
-    session = client.websocket_connect(url, **kwargs)
-    ws = session.__enter__()
-    try:
-        yield ws
-    except BaseException:
-        info = sys.exc_info()
-        with contextlib.suppress(concurrent.futures.CancelledError):
-            session.__exit__(*info)
-        raise
-    with contextlib.suppress(concurrent.futures.CancelledError):
-        session.__exit__(None, None, None)
 
 
 def make(tmp_path, **kw):
@@ -311,15 +291,21 @@ def test_recording_ids_must_match_the_folder_pattern_exactly(client):
 
 
 @pytest.mark.parametrize("corrupt", ["{broken", "[]", '{"global": {}}', '{"global": {"core:sample_rate": "fast"}}',
-                                     '{"global": 3, "captures": []}'])
-def test_corrupt_metadata_is_not_found_never_a_500(tmp_path, corrupt):
-    with make(tmp_path) as c:
+                                     '{"global": 3, "captures": []}',
+                                     '{"global": {"core:sample_rate": 25000, "qrm_hunter:radio_center_hz": "x"}}'])
+def test_corrupt_metadata_is_not_found_never_a_500(tmp_path, monkeypatch, corrupt):
+    with make(tmp_path, desktop=True) as c:
+        opened = []
+        monkeypatch.setattr(server_mod, "reveal", lambda p: opened.append(p))
         start_radio(c, buffered=2.2)
         rid = c.post("/api/record/snapshot", json={"seconds": 2.1}).json()["id"]
         (tmp_path / "rec" / rid / "iq.sigmf-meta").write_text(corrupt, encoding="utf-8")
         assert c.get("/api/recordings").json() == []
         assert c.patch(f"/api/recordings/{rid}", json={"name": "fine"}).status_code == 404
         assert c.post("/api/analyse", json={"source": "recording", "id": rid}).status_code == 404
+        assert c.get(f"/api/recordings/{rid}/waterfall.png").status_code == 404
+        assert c.post(f"/api/recordings/{rid}/open-folder", json={}).status_code == 404
+        assert not opened
         store = store_mod.RecordingStore(tmp_path / "rec")
         with pytest.raises(store_mod.RecordingNotFound):
             store.info(rid)
@@ -348,3 +334,16 @@ def test_start_and_stop_do_not_block_the_event_loop(client):
         stop.set()
         th.join(10)
     assert ticks and max(ticks) < 2.0
+
+
+def test_failure_to_attach_the_analysis_still_returns_the_saved_recording(client, monkeypatch):
+    start_radio(client, buffered=2.2)
+    result = client.post("/api/analyse", json={"source": "live", "seconds": 2.1}).json()
+
+    def refuse(self, rec_id, text):
+        raise OSError(28, "no space left")
+
+    monkeypatch.setattr(store_mod.RecordingStore, "save_analysis", refuse)
+    r = client.post("/api/record/snapshot", json={"analysis_id": result["id"]})
+    assert r.status_code == 200 and r.json()["has_analysis"] is False
+    assert [x["id"] for x in client.get("/api/recordings").json()] == [r.json()["id"]]

@@ -258,7 +258,7 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
         if signatures_warning:
             log.warning("%s", signatures_warning)
     runner = JobRunner("analysis")
-    last_live: dict[str, LiveClip] = {}
+    latest_live: list[LiveClip | None] = [None]  # one slot, replaced by a single assignment
 
     def save_settings(**changes) -> Settings:
         with settings_lock:
@@ -486,17 +486,21 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
     def record_snapshot(req: SnapshotRequest) -> dict:
         if req.analysis_id is None:
             return recording_call(recorder.snapshot, req.seconds, req.lo_hz, req.hi_hz).model_dump()
-        clip = last_live.get(req.analysis_id)
-        if clip is None:
+        clip = latest_live[0]
+        if clip is None or clip.result.id != req.analysis_id:
             raise HTTPException(404, "that analysis is no longer available; run Analyse again")
         info = recording_call(recorder.save_iq, from_ci16(clip.iq16), clip.rate, clip.center_hz, clip.t0,
                               lo_hz=clip.lo_hz, hi_hz=clip.hi_hz, radio_center_hz=clip.radio_center_hz)
         source = clip.result.source.model_copy(update={"kind": "recording", "recording_id": info.id})
         result = clip.result.model_copy(update={"source": source})
         store_ = recordings()
-        recording_call(store_.save_analysis, info.id, result.model_dump_json())
+        try:
+            store_.save_analysis(info.id, result.model_dump_json())
+            info = store_.info(info.id)
+        except (OSError, RecordingNotFound) as exc:
+            log.warning("could not attach the analysis to %s: %s", info.id, exc)
         session.events.publish({"type": "recordings"})
-        return recording_call(store_.info, info.id).model_dump()
+        return info.model_dump()
 
     @api.post("/record/start")
     def record_start(req: StartRequest) -> dict:
@@ -516,7 +520,9 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
 
     @api.get("/recordings/{rec_id}/waterfall.png")
     def recording_waterfall(rec_id: str) -> FileResponse:
-        path = recording_call(recordings().path, rec_id) / "waterfall.png"
+        store_ = recordings()
+        recording_call(store_.info, rec_id)  # a recording with unreadable metadata is not found
+        path = store_.path(rec_id) / "waterfall.png"
         if not path.is_file():
             raise HTTPException(404, "this recording has no waterfall image")
         return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-cache"})
@@ -537,7 +543,9 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
     def open_recording_folder(rec_id: str) -> Response:
         if not desktop:
             raise HTTPException(403, "Open folder is only available in the desktop app")
-        folder = recording_call(recordings().path, rec_id)
+        store_ = recordings()
+        recording_call(store_.info, rec_id)
+        folder = store_.path(rec_id)
         try:
             reveal(folder)
         except OSError as exc:
@@ -559,9 +567,9 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
             result = run_analysis(lambda ev: analyser.analyse(
                 ex.iq, ex.rate, ex.center_hz, ctx, kind="live", lo_hz=ex.lo_hz, hi_hz=ex.hi_hz,
                 check=make_check(ev)))
-            last_live.clear()
-            last_live[result.id] = LiveClip(to_ci16(ex.iq), ex.rate, ex.center_hz, snap.t0, ex.lo_hz, ex.hi_hz,
+            clip = LiveClip(to_ci16(ex.iq), ex.rate, ex.center_hz, snap.t0, ex.lo_hz, ex.hi_hz,
                                             snap.center_hz, result)
+            latest_live[0] = clip
             return result.model_dump()
         if not req.id:
             raise HTTPException(422, "id is required when analysing a recording")
