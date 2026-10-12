@@ -65,6 +65,17 @@
       ctx.fillText(b.name, Math.max(x0, 0) + 4 * dpr, 12 * dpr);
     }
 
+    const sel = app.region;
+    if (sel && sel.hiHz > view.loHz && sel.loHz < view.hiHz) {
+      const x0 = hzToX(sel.loHz, view, W), x1 = hzToX(sel.hiHz, view, W);
+      ctx.fillStyle = c.marker;
+      ctx.globalAlpha = 0.18;
+      ctx.fillRect(x0, 0, x1 - x0, plotH);
+      ctx.globalAlpha = 1;
+      ctx.fillRect(Math.round(x0), 0, Math.max(1, Math.round(dpr)), plotH);
+      ctx.fillRect(Math.round(x1), 0, Math.max(1, Math.round(dpr)), plotH);
+    }
+
     ctx.strokeStyle = c.grid;
     ctx.lineWidth = 1;
     ctx.fillStyle = c.text;
@@ -215,6 +226,7 @@
     void app.settings?.theme;
     colorCache = null;
     void app.radio?.tune_hz; void app.radio?.bw_hz; void app.radio?.mode;
+    void app.region;
     if (!app.peakHold) peak = null;
     dirty = true;
   });
@@ -226,7 +238,7 @@
 </script>
 
 <div class="wrap" bind:this={wrap}>
-  <canvas bind:this={canvas} aria-label="Spectrum: click to tune, wheel to zoom, drag to pan"></canvas>
+  <canvas bind:this={canvas} aria-label="Spectrum: click to tune, wheel to zoom, drag to pan, Shift+drag to select a region"></canvas>
 </div>
 
 <style>

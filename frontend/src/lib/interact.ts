@@ -18,16 +18,19 @@ export interface PlotInteractionOptions {
   resetView(): void;
   getPassband?(): [number, number] | null;
   onCursor?(x: number | null, y: number | null): void;
+  /** Shift+drag: select the region between two frequencies (called while dragging and on release). */
+  select?(aHz: number, bHz: number): void;
 }
 
 /** Wheel = zoom around cursor, drag = pan (or drag the passband to fine-tune), click = tune,
- *  double-click = full span. Returns a detach function. */
+ *  double-click = full span, Shift+drag = select a region (Shift+click clears it). Returns a detach function. */
 export function attachPlotInteractions(el: HTMLElement, o: PlotInteractionOptions): () => void {
   let downX: number | null = null;
   let lastX = 0;
   let dragging = false;
   let tuningDrag = false;
   let lastTune: { t: number; x: number } | null = null;
+  let selectFrom: number | null = null;
 
   const rect = () => el.getBoundingClientRect();
   const hzAt = (clientX: number) => {
@@ -49,6 +52,10 @@ export function attachPlotInteractions(el: HTMLElement, o: PlotInteractionOption
   const onDown = (e: PointerEvent) => {
     if (e.button !== 0) return;
     el.setPointerCapture(e.pointerId);
+    if (e.shiftKey && o.select) {
+      selectFrom = hzAt(e.clientX);
+      return;
+    }
     downX = lastX = e.clientX;
     dragging = false;
     const pb = o.getPassband?.();
@@ -58,6 +65,10 @@ export function attachPlotInteractions(el: HTMLElement, o: PlotInteractionOption
   const onMove = (e: PointerEvent) => {
     const r = rect();
     o.onCursor?.(e.clientX - r.left, e.clientY - r.top);
+    if (selectFrom !== null) {
+      o.select?.(selectFrom, hzAt(e.clientX));
+      return;
+    }
     if (downX === null) return;
     if (!dragging && Math.abs(e.clientX - downX) > 4) dragging = true;
     if (!dragging) return;
@@ -70,6 +81,11 @@ export function attachPlotInteractions(el: HTMLElement, o: PlotInteractionOption
     else o.setView(panView(v, -dx * hzPerPx, o.getLimit()));
   };
   const onUp = (e: PointerEvent) => {
+    if (selectFrom !== null) {
+      o.select?.(selectFrom, hzAt(e.clientX));
+      selectFrom = null;
+      return;
+    }
     // PointerEvent.detail is 0 in Chromium, so detect the second click of a double-click by time and position.
     // dblclick then resets the view instead of tuning twice.
     if (downX !== null && !dragging) {
@@ -86,6 +102,7 @@ export function attachPlotInteractions(el: HTMLElement, o: PlotInteractionOption
     downX = null;
     dragging = false;
     tuningDrag = false;
+    selectFrom = null;
   };
   const onLeave = () => o.onCursor?.(null, null);
   const onDbl = () => o.resetView();

@@ -11,6 +11,8 @@ import type { PlotInteractionOptions } from "./interact";
 import { byFrequency, openConfig, recallPatch } from "./memories";
 import { selectBand } from "./bands";
 import { taSnackbar, type TaSnack } from "./rds";
+import { initialRecord, type RecordUi } from "./recording";
+import { regionBetween, type Region, type SpanChoice } from "./region";
 import type {
   Band, DeviceInfo, Memory, MemoryFields, Mode, RadioState, RdsState, Settings, SettingsPatch, StatePatch, Stats,
 } from "./types";
@@ -43,6 +45,11 @@ export const app = $state({
   taSnack: null as TaSnack | null,
   /** The mode to go back to when leaving the FM broadcast band. */
   prevMode: null as Mode | null,
+  /** Shift+drag selection on the spectrum or waterfall; Esc clears it. */
+  region: null as Region | null,
+  spanChoice: "visible" as SpanChoice,
+  record: initialRecord() as RecordUi,
+  recordSeconds: 10,
 });
 
 export function fullSpan(r: RadioState): View {
@@ -166,6 +173,11 @@ export function plotOptions(onCursor?: (x: number | null, y: number | null) => v
     },
     getPassband: () => (app.radio ? passband(app.radio.tune_hz, app.radio.mode, app.radio.bw_hz) : null),
     onCursor,
+    select: (aHz, bHz) => {
+      const r = regionBetween(aHz, bHz, app.radio ? fullSpan(app.radio) : app.view);
+      app.region = r;
+      app.spanChoice = r ? "selection" : "visible";
+    },
   };
 }
 

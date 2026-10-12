@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError } from "./api";
+import { api, ApiError, withToken } from "./api";
 
 function respond(status: number, statusText: string, body: string) {
   vi.stubGlobal(
@@ -107,5 +107,12 @@ describe("memory client", () => {
     expect(await (await exportMemories("csv")).text()).toBe("name,tune_hz\n");
     expect(fetchMock.mock.calls[0][0]).toBe("/api/memories/export?format=csv");
     expect((await errorOf(listMemories())).message).toBe("bad");
+  });
+});
+
+describe("withToken", () => {
+  it("adds the token for links that cannot send headers", () => {
+    expect(withToken("/api/recordings/a/waterfall.png", "?token=t k")).toBe("/api/recordings/a/waterfall.png?token=t%20k");
+    expect(withToken("/api/x", "")).toBe("/api/x");
   });
 });

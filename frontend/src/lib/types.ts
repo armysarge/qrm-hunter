@@ -47,9 +47,13 @@ export interface Settings {
   colormap: ColormapName;
   last_device_id?: string | null;
   last_tune_hz: number;
+  prebuffer_s: number;
+  recordings_dir: string;
+  callsign: string;
 }
 
-export type SettingsPatch = Partial<Pick<Settings, "region" | "mains_hz" | "theme" | "colormap">>;
+export type SettingsPatch = Partial<Pick<Settings,
+  "region" | "mains_hz" | "theme" | "colormap" | "prebuffer_s" | "recordings_dir" | "callsign">>;
 
 export interface MemoryFields {
   name: string;
@@ -82,9 +86,82 @@ export interface RdsState {
   block_error_rate: number;
 }
 
+export interface RecordingInfo {
+  id: string;
+  name: string;
+  created: string;
+  center_hz: number;
+  sample_rate: number;
+  lo_hz: number;
+  hi_hz: number;
+  span_hz: number;
+  duration_s: number;
+  size_bytes: number;
+  has_analysis: boolean;
+  top_cause: string | null;
+  truncated: boolean;
+  end_reason: string;
+  device_id: string;
+  band: string | null;
+  callsign: string | null;
+}
+
+export interface RecordStatus { recording: boolean; elapsed_s: number; bytes: number; id: string | null; }
+export interface RecordRequest { seconds?: number; lo_hz?: number; hi_hz?: number; analysis_id?: string; lead_in_s?: number; }
+
+export interface Cause {
+  id: string;
+  name: string;
+  score: number;
+  rule_score: number;
+  model_score: number | null;
+  evidence: string[];
+  hunt: string;
+  description: string;
+  beta: boolean;
+}
+
+export interface AnalysisSource {
+  kind: "live" | "recording";
+  center_hz: number;
+  sample_rate: number;
+  lo_hz: number;
+  hi_hz: number;
+  seconds: number;
+  recording_id: string | null;
+}
+
+export interface AnalysisResult {
+  id: string;
+  created: string;
+  source: AnalysisSource;
+  causes: Cause[];
+  features: Record<string, number | null>;
+  timing_ms: Record<string, number>;
+  versions: Record<string, string>;
+  ranker: string;
+}
+
+export type AnalyseRequest =
+  | { source: "live"; seconds?: number; lo_hz?: number; hi_hz?: number }
+  | { source: "recording"; id: string };
+
+export interface AppInfo {
+  version: string;
+  desktop: boolean;
+  recordings_dir: string;
+  default_recordings_dir: string;
+  ranker: string;
+  signatures_warning: string | null;
+}
+
+/** Server events. An "error" with code "signatures" reports a user signatures file that could not be loaded. */
 export type ServerEvent =
   | { type: "state"; state: RadioState }
   | { type: "rds"; rds: RdsState | null }
   | { type: "error"; code: string; message: string }
   | { type: "stats"; stats: Stats }
-  | { type: "memories" };
+  | { type: "memories" }
+  | { type: "recording"; elapsed_s: number; bytes: number }
+  | { type: "recording_stopped"; reason: string; recording: RecordingInfo | null; error: string | null }
+  | { type: "recordings" };

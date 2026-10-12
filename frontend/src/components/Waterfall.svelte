@@ -6,6 +6,7 @@
   import { buildLut } from "../lib/colormap";
   import { passband, resampleToView } from "../lib/freq";
   import { attachPlotInteractions } from "../lib/interact";
+  import { regionOverlay } from "../lib/region";
 
   let canvas: HTMLCanvasElement;
   let wrap: HTMLDivElement;
@@ -21,6 +22,8 @@
     const span = v.hiHz - v.loHz;
     return { left: ((lo - v.loHz) / span) * 100, width: ((hi - lo) / span) * 100, tune: ((r.tune_hz - v.loHz) / span) * 100 };
   });
+
+  const sel = $derived(regionOverlay(app.region, app.view));
 
   onMount(() => {
     try {
@@ -85,11 +88,12 @@
 </script>
 
 <div class="wrap" bind:this={wrap}>
-  <canvas bind:this={canvas} aria-label="Waterfall: click to tune, wheel to zoom, drag to pan"></canvas>
+  <canvas bind:this={canvas} aria-label="Waterfall: click to tune, wheel to zoom, drag to pan, Shift+drag to select a region"></canvas>
   {#if overlay}
     <div class="pb" style:left="{overlay.left}%" style:width="{overlay.width}%"></div>
     <div class="tune" style:left="{overlay.tune}%"></div>
   {/if}
+  {#if sel}<div class="sel" style:left="{sel.left}%" style:width="{sel.width}%"></div>{/if}
   {#if glError}<p class="err">{glError}</p>{/if}
 </div>
 
@@ -101,6 +105,11 @@
   .tune {
     position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; pointer-events: none;
     background: var(--md-primary); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.7);
+  }
+  .sel {
+    position: absolute; top: 0; bottom: 0; pointer-events: none;
+    background: color-mix(in srgb, var(--md-tertiary) 22%, transparent);
+    border-inline: 1px solid var(--md-tertiary);
   }
   .err { position: absolute; inset: 0; margin: auto; height: fit-content; text-align: center; color: var(--md-error); }
 </style>

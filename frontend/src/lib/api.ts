@@ -1,5 +1,6 @@
 import type {
-  Band, DeviceInfo, ImportFormat, Memory, MemoryFields, RadioState, RdsState, Settings, SettingsPatch, StatePatch,
+  AnalyseRequest, AnalysisResult, AppInfo, Band, DeviceInfo, ImportFormat, Memory, MemoryFields, RadioState, RdsState,
+  RecordingInfo, RecordRequest, RecordStatus, Settings, SettingsPatch, StatePatch,
 } from "./types";
 
 export function getToken(search: string = typeof location !== "undefined" ? location.search : ""): string | null {
@@ -63,3 +64,22 @@ export const importMemories = (format: ImportFormat, data: string, replace = fal
 /** The export file as a Blob (fetched rather than linked so the bearer token is sent as a header). */
 export const exportMemories = async (format: ImportFormat) =>
   (await request(`/api/memories/export?format=${format}`)).blob();
+
+/** A same-origin URL for elements that cannot send headers (<img>), with the token as a query parameter. */
+export function withToken(path: string, search?: string): string {
+  const token = getToken(search);
+  return token ? `${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : path;
+}
+
+const rec = (id: string) => `/api/recordings/${encodeURIComponent(id)}`;
+
+export const recordSnapshot = (body: RecordRequest) => api<RecordingInfo>("/api/record/snapshot", json("POST", body));
+export const recordStart = (body: RecordRequest) => api<RecordStatus>("/api/record/start", json("POST", body));
+export const recordStop = () => api<RecordingInfo>("/api/record/stop", json("POST", {}));
+export const recordStatus = () => api<RecordStatus>("/api/record/status");
+export const listRecordings = () => api<RecordingInfo[]>("/api/recordings");
+export const renameRecording = (id: string, name: string) => api<RecordingInfo>(rec(id), json("PATCH", { name }));
+export const trashRecording = (id: string) => api<void>(rec(id), json("DELETE", {}));
+export const openRecordingFolder = (id: string) => api<void>(`${rec(id)}/open-folder`, json("POST", {}));
+export const analyse = (body: AnalyseRequest) => api<AnalysisResult>("/api/analyse", json("POST", body));
+export const getAppInfo = () => api<AppInfo>("/api/app");

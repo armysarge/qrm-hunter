@@ -22,6 +22,9 @@
   import { frameBus } from "./lib/framebus";
   import { clampView, snapHz } from "./lib/freq";
   import { clampSplit, loadSplit } from "./lib/split";
+  import { onRecordEvent, syncRecordStatus } from "./lib/record-actions";
+  import { clampSeconds } from "./lib/recording";
+  import { keepRegion } from "./lib/region";
   import type { ServerEvent } from "./lib/types";
 
   let statusH = $state(40);
@@ -34,13 +37,18 @@
   const events = new ReconnectingSocket("/ws/events", {
     onStatus: (ok) => (app.connected = ok),
     // Memory events sent while disconnected were missed: refetch on every (re)connect.
-    onOpen: () => void refreshMemories(),
+    // A recording that started or ended while disconnected is picked up from its status.
+    onOpen: () => {
+      void refreshMemories();
+      void syncRecordStatus();
+    },
     onMessage: (ev) => {
       const msg = JSON.parse(ev.data as string) as ServerEvent;
       if (msg.type === "state") app.radio = msg.state;
       else if (msg.type === "error") app.error = msg.message;
       else if (msg.type === "stats") app.stats = msg.stats;
       else if (msg.type === "rds") noteRds(msg.rds);
+      else if (msg.type === "recording" || msg.type === "recording_stopped") onRecordEvent(msg);
       else if (msg.type === "memories") void refreshMemories(); // changed here or in another window
     },
   });
@@ -68,6 +76,7 @@
       try {
         const [settings, plan, state, rds] = await Promise.all([getSettings(), getBandplan(), getState(), getRds()]);
         app.settings = settings;
+        app.recordSeconds = clampSeconds(10, settings.prebuffer_s);
         app.bands = plan.bands;
         app.radio = state;
         if (rds && !app.rds) noteRds(rds); // the events socket may already have sent a newer one
@@ -105,6 +114,9 @@
       const ours = following && isRetuneTune(tune); // the tuned frequency the pan retune itself asked for
       if (retuned && !ours && (tune < next.loHz || tune > next.hiHz)) next = limit;
       if (next.loHz !== cur.loHz || next.hiHz !== cur.hiHz) app.view = next;
+      const kept = keepRegion(app.region, limit);
+      if (kept?.loHz !== app.region?.loHz || kept?.hiHz !== app.region?.hiHz) app.region = kept;
+      if (!kept && app.spanChoice === "selection") app.spanChoice = "visible";
     });
   });
 
@@ -143,6 +155,11 @@
     if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
     if ((e.target as HTMLElement).closest("input, select, textarea")) return;
     if (document.querySelector("dialog[open]")) return; // a modal (save/edit, delete confirm) is open
+    if (e.key === "Escape" && app.region && !document.querySelector("[role=menu]")) {
+      app.region = null;
+      app.spanChoice = "visible";
+      return;
+    }
     const mk = memoryKey(e, false);
     if (mk?.kind === "save" && app.radio) {
       e.preventDefault();
