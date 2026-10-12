@@ -532,26 +532,37 @@ def test_wfm_rejected_below_one_megasample():
 
 
 def test_rds_events_are_published_on_change_and_reset_on_retune(session):
+    # Timestamped as they are published, not as the consumer receives them: a busy machine can
+    # delay the consumer and hand it a burst, but cannot make the producer publish faster.
+    times = []
+    publish = session.events.publish
+
+    def timed(event):
+        if event["type"] == "rds" and event["rds"] is not None:
+            times.append(time.perf_counter())
+        publish(event)
+
+    session.events.publish = timed
+
     async def main():
         sub = session.events.subscribe()
         await asyncio.to_thread(session.open, "synthetic", StatePatch(tune_hz=100_000_000.0, mode="WFM"))
-        times = []
-        ev = await next_of(sub, lambda e: e["type"] == "rds" and (times.append(time.monotonic()) or True)
-                           and e["rds"]["ps"] == "QRM DEMO", timeout=15.0)
+        ev = await next_of(sub, lambda e: e["type"] == "rds" and e["rds"]["ps"] == "QRM DEMO", timeout=15.0)
         snapshot = session.rds
         await asyncio.to_thread(session.update, StatePatch(tune_hz=100_100_000.0))
         cleared = await next_of(sub, lambda e: e["type"] == "rds")
         await asyncio.to_thread(session.update, StatePatch(mode="USB"))
-        return ev, snapshot, cleared, times
+        return ev, snapshot, cleared
 
-    ev, snapshot, cleared, times = asyncio.run(main())
+    ev, snapshot, cleared = asyncio.run(main())
     rds = ev["rds"]
     assert (rds["pi"], rds["pty"], rds["tp"], rds["stereo"], rds["synced"]) == ("6201", 10, True, True, True)
     assert snapshot == rds
     assert cleared == {"type": "rds", "rds": None}  # a retune forgets the old station at once
-    # at most 5 per second. Arrival times are taken by the consumer, which a busy machine can delay
-    # and then catch up on in a burst, so the rate is judged over the whole span with some slack.
-    assert (len(times) - 1) / (times[-1] - times[0] + 0.5) <= 5.0
+    # at most 5 per second: every gap between two published updates is at least 0.2 s (less a
+    # little for the moment between the throttle's clock reading and the publish call)
+    assert len(times) >= 2
+    assert min(b - a for a, b in zip(times, times[1:])) >= 0.19
     assert session.rds is None  # not WFM any more
 
 

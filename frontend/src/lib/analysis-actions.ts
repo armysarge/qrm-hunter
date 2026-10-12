@@ -9,8 +9,12 @@ function openPanel(): void {
   app.memoriesOpen = false;
 }
 
+/** An outcome arrived while another side panel was open; the next Analyse shows it. */
+let unseen = false;
+
 async function run(req: AnalyseRequest, label: string): Promise<void> {
   if (app.analysis.state === "running") return;
+  unseen = false;
   openPanel();
   app.analysis = { state: "running", label, startedAt: Date.now() };
   try {
@@ -18,10 +22,18 @@ async function run(req: AnalyseRequest, label: string): Promise<void> {
   } catch (e) {
     app.analysis = { state: "error", message: (e as Error).message };
   }
-  openPanel(); // the outcome is shown even if the panel was closed meanwhile
+  // The outcome is shown even if the panel was closed meanwhile, but a drawer the user opened
+  // in the meantime stays open.
+  if (app.recordingsOpen || app.memoriesOpen) unseen = true;
+  else app.analysisOpen = true;
 }
 
 export function analyseLive(): Promise<void> {
+  if (unseen && app.analysis.state !== "running") {
+    unseen = false;
+    openPanel();
+    return Promise.resolve();
+  }
   const span = targetSpan(app.spanChoice, app.region, app.view);
   return run({ source: "live", seconds: app.recordSeconds, ...span },
     `Analysing the last ${app.recordSeconds} s of ${describeSpan(span.lo_hz, span.hi_hz)}`);

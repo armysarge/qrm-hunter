@@ -123,6 +123,20 @@ def test_session_retune_clears_the_prebuffer():
         s.close()
 
 
+def test_an_invalid_prebuffer_length_never_opens_the_device():
+    opened = []
+
+    class Tracked(SyntheticDevice):
+        def open(self):
+            opened.append(self)
+            super().open()
+
+    s = RadioSession(lambda _id: Tracked(realtime=True), prebuffer_s=90)
+    with pytest.raises(ValueError):
+        s.open("synthetic")
+    assert opened == [] and not s.state.running
+
+
 def test_session_without_prebuffer():
     s = RadioSession(factory, prebuffer_s=0)
     try:

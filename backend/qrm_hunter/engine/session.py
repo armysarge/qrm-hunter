@@ -286,6 +286,9 @@ class RadioSession:
                     merged = merged.model_copy(update={"center_hz": merged.tune_hz + merged.sample_rate / 4})
                 merged = self._recentre(merged, device.info, center_explicit=False)
                 spectrum, demod = self._build_dsp(merged)
+                # Built before the device opens: an invalid length must not leave it open. The ring
+                # itself is allocated on the first block.
+                prebuf = PreBuffer(self.prebuffer_s) if self.prebuffer_s > 0 else None
             except BaseException:
                 self._safe_close(device)
                 raise
@@ -300,7 +303,7 @@ class RadioSession:
             demod.set_offset(merged.tune_hz - merged.center_hz)
             block = block_size_for(merged.sample_rate)
             run = _Run(device, max(4, math.ceil(RING_SECONDS * merged.sample_rate / block)))
-            run.prebuf = PreBuffer(self.prebuffer_s) if self.prebuffer_s > 0 else None
+            run.prebuf = prebuf
             with self._lock:
                 self._run = run
                 self._state = merged

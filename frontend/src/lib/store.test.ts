@@ -105,7 +105,7 @@ describe("pan retune", () => {
     });
 
     it("keeps a pan past the span edge inside the span and sends no retune", async () => {
-      plotOptions().panBy(5_000_000);
+      plotOptions().panBy!(5_000_000);
       await tick();
       expect(app.view).toEqual({ loHz: 7_124_000, hiHz: 8_124_000 });
       retune.poke();

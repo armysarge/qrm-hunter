@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable, Literal
 from urllib.parse import urlsplit
 
+import numpy as np
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, WebSocket
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
@@ -130,6 +131,14 @@ class LiveClip:
     def __init__(self, iq16, rate, center_hz, t0, lo_hz, hi_hz, radio_center_hz, result: AnalysisResult) -> None:
         self.iq16, self.rate, self.center_hz, self.t0 = iq16, rate, center_hz, t0
         self.lo_hz, self.hi_hz, self.radio_center_hz, self.result = lo_hz, hi_hz, radio_center_hz, result
+
+
+def clip_to_ci16(iq: np.ndarray, chunk: int = 1 << 18) -> np.ndarray:
+    """to_ci16 a chunk at a time: its float temporaries are several times the size of the input."""
+    out = np.empty(2 * iq.size, np.int16)
+    for i in range(0, iq.size, chunk):
+        out[2 * i:2 * (i + chunk)] = to_ci16(iq[i:i + chunk])
+    return out
 
 
 def dc_inside(radio_center_hz: float | None, lo_hz: float, hi_hz: float) -> float | None:
@@ -273,6 +282,7 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
             await run_in_threadpool(session.close)  # finalises a running recording
         finally:
             runner.shutdown()
+            latest_live[0] = None
             await run_in_threadpool(lambda: save_settings(last_tune_hz=int(session.snapshot.tune_hz)))
 
     app = FastAPI(title="QRM Hunter", lifespan=lifespan)
@@ -556,21 +566,29 @@ def create_app(session: RadioSession, store: SettingsStore, *, token: str | None
     def analyse_route(req: AnalyseRequest) -> dict:
         mains = app.state.settings.mains_hz
         if req.source == "live":
-            gen = session.current_generation[0]
-            snap = session.snapshot_iq(req.seconds)
-            if snap is None and session.prebuffer_s <= 0:
-                raise HTTPException(422, "the pre-buffer is off; set Pre-buffer seconds in Settings")
-            if snap is None or snap.gen != gen or snap.seconds < MIN_SNAPSHOT_S:
-                raise HTTPException(422, "need at least 2 s of data at this frequency")
-            ex = recording_call(extract_span, snap.iq, snap.sample_rate, snap.center_hz, req.lo_hz, req.hi_hz)
-            ctx = AnalysisContext(mains_hz=mains, dc_hz=dc_inside(snap.center_hz, ex.lo_hz, ex.hi_hz))
-            result = run_analysis(lambda ev: analyser.analyse(
-                ex.iq, ex.rate, ex.center_hz, ctx, kind="live", lo_hz=ex.lo_hz, hi_hz=ex.hi_hz,
-                check=make_check(ev)))
-            clip = LiveClip(to_ci16(ex.iq), ex.rate, ex.center_hz, snap.t0, ex.lo_hz, ex.hi_hz,
-                                            snap.center_hz, result)
-            latest_live[0] = clip
-            return result.model_dump()
+            def live_job(ev) -> AnalysisResult:
+                # Snapshot and extraction run inside the job: a request made while another analysis
+                # runs is refused before it touches the pre-buffer, and they count toward the timeout.
+                latest_live[0] = None  # a new analysis replaces the previous clip; never hold two
+                gen = session.current_generation[0]
+                snap = session.snapshot_raw(req.seconds)  # int16, extracted a chunk at a time
+                if snap is None and session.prebuffer_s <= 0:
+                    raise HTTPException(422, "the pre-buffer is off; set Pre-buffer seconds in Settings")
+                if snap is None or snap.gen != gen or snap.seconds < MIN_SNAPSHOT_S:
+                    raise HTTPException(422, "need at least 2 s of data at this frequency")
+                radio_center, t0 = snap.center_hz, snap.t0
+                ex = recording_call(extract_span, snap.raw, snap.sample_rate, radio_center, req.lo_hz, req.hi_hz)
+                del snap  # only the extracted clip is needed from here on
+                ctx = AnalysisContext(mains_hz=mains, dc_hz=dc_inside(radio_center, ex.lo_hz, ex.hi_hz))
+                result = analyser.analyse(ex.iq, ex.rate, ex.center_hz, ctx, kind="live", lo_hz=ex.lo_hz,
+                                          hi_hz=ex.hi_hz, check=make_check(ev))
+                if not ev.is_set():  # a timed-out request never sees this result, so keeps no clip
+                    # Kept as int16 for "Save as recording" until the next analysis replaces it.
+                    latest_live[0] = LiveClip(clip_to_ci16(ex.iq), ex.rate, ex.center_hz, t0, ex.lo_hz,
+                                              ex.hi_hz, radio_center, result)
+                return result
+
+            return run_analysis(live_job).model_dump()
         if not req.id:
             raise HTTPException(422, "id is required when analysing a recording")
         store_ = recordings()

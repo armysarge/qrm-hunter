@@ -201,6 +201,16 @@ def test_live_analysis_and_save_as_recording(client):
     assert client.post("/api/record/snapshot", json={"analysis_id": "gone"}).status_code == 404
 
 
+def test_only_the_latest_live_clip_is_kept(client):
+    start_radio(client, buffered=2.2)
+    c = client.session.state.center_hz
+    body = {"source": "live", "seconds": 2.1, "lo_hz": c - 50_000, "hi_hz": c + 50_000}
+    first = client.post("/api/analyse", json=body).json()["id"]
+    second = client.post("/api/analyse", json=body).json()["id"]
+    assert client.post("/api/record/snapshot", json={"analysis_id": first}).status_code == 404
+    assert client.post("/api/record/snapshot", json={"analysis_id": second}).status_code == 200
+
+
 def test_recording_analysis_is_saved(client):
     start_radio(client, buffered=2.2)
     c = client.session.state.center_hz
@@ -221,8 +231,13 @@ def test_second_analysis_is_409(tmp_path):
         t = threading.Thread(target=lambda: first.update(r=c.post("/api/analyse", json={"source": "live", "seconds": 2})))
         t.start()
         assert slow.started.wait(5)
+        snapshots = []
+        for name in ("snapshot_raw", "snapshot_iq"):
+            real = getattr(c.session, name)
+            setattr(c.session, name, lambda seconds=None, real=real: snapshots.append(seconds) or real(seconds))
         r = c.post("/api/analyse", json={"source": "live", "seconds": 2})
         assert r.status_code == 409 and "already running" in r.json()["detail"]
+        assert snapshots == []  # refused before it read the pre-buffer
         slow.release.set()
         t.join(5)
         assert first["r"].status_code == 200

@@ -21,6 +21,7 @@ beforeEach(() => {
   app.analysis = { state: "idle" };
   app.analysisOpen = false;
   app.memoriesOpen = false;
+  app.recordingsOpen = false;
   app.error = null;
   app.view = { loHz: 7_000_000, hiHz: 7_200_000 };
   app.region = null;
@@ -65,6 +66,27 @@ describe("analysis actions", () => {
     d.resolve(fixtureResult());
     await p;
     expect(app.analysisOpen).toBe(true);
+  });
+
+  it("leaves a drawer opened meanwhile open, and Analyse then shows the outcome", async () => {
+    const d = deferred<ReturnType<typeof fixtureResult>>();
+    analyse.mockReturnValue(d.promise);
+    const p = analyseLive();
+    app.analysisOpen = false;
+    app.recordingsOpen = true; // the user opened the recordings drawer while it ran
+    d.resolve(fixtureResult());
+    await p;
+    expect(app.recordingsOpen).toBe(true);
+    expect(app.analysisOpen).toBe(false);
+    expect(app.analysis).toMatchObject({ state: "done" });
+    await analyseLive();
+    expect(analyse).toHaveBeenCalledTimes(1); // shown, not run again
+    expect(app.analysisOpen).toBe(true);
+    expect(app.recordingsOpen).toBe(false);
+    app.analysisOpen = false;
+    analyse.mockResolvedValue(fixtureResult({ id: "a2" }));
+    await analyseLive(); // once seen, Analyse runs a new analysis
+    expect(analyse).toHaveBeenCalledTimes(2);
   });
 
   it("saves the analysed clip once", async () => {
