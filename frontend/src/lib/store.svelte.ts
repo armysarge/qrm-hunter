@@ -214,7 +214,10 @@ const fail = (e: unknown) => {
 
 export async function refreshDevices(): Promise<void> {
   try {
-    app.devices = await listDevices();
+    const listed = await listDevices();
+    // A recording being replayed is not discovered; keep it while it is the selected device.
+    const kept = app.devices.find((d) => d.id === app.selectedDevice && d.driver === "replay");
+    app.devices = kept && !listed.some((d) => d.id === kept.id) ? [...listed, kept] : listed;
     if (!app.devices.some((d) => d.id === app.selectedDevice)) app.selectedDevice = app.devices[0]?.id ?? "";
   } catch (e) {
     fail(e);
@@ -308,13 +311,16 @@ export async function applyAutoRange(): Promise<void> {
 }
 
 
-export async function saveSettings(patch: SettingsPatch): Promise<void> {
+/** Returns null on success or the error message. */
+export async function saveSettings(patch: SettingsPatch): Promise<string | null> {
   try {
     app.settings = await patchSettings(patch);
     // "Save last N s" can never exceed the pre-buffer, so follow a changed length.
     app.recordSeconds = clampSeconds(app.recordSeconds, app.settings.prebuffer_s);
+    return null;
   } catch (e) {
     fail(e);
+    return (e as Error).message;
   }
 }
 

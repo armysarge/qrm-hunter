@@ -42,6 +42,7 @@ export async function renameRec(id: string, name: string): Promise<string | null
     void refreshRecordings(); // supersedes any older list still in flight
     return null;
   } catch (e) {
+    void refreshRecordings(); // the recording may be gone or changed
     return (e as Error).message;
   }
 }
@@ -53,6 +54,7 @@ export async function trashRec(id: string): Promise<void> {
     void refreshRecordings();
   } catch (e) {
     app.error = (e as Error).message;
+    void refreshRecordings();
   }
 }
 

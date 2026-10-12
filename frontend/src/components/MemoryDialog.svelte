@@ -22,6 +22,12 @@
     nameInput.select();
   });
 
+  // State is cleared directly: the native close event is only a backstop.
+  function closeDialog() {
+    app.memoryDialog = null;
+    if (dialog.open) dialog.close();
+  }
+
   async function submit(e: SubmitEvent) {
     e.preventDefault();
     if (!valid || busy) return;
@@ -30,11 +36,11 @@
       ? await editMemory(editing.id, { name: name.trim(), note })
       : r ? await saveMemory(memoryFromRadio(r, name.trim(), note)) : "Radio state not loaded yet";
     busy = false;
-    if (error === null) dialog.close();
+    if (error === null) closeDialog();
   }
 </script>
 
-<dialog bind:this={dialog} class="dialog" aria-labelledby="memory-dialog-title" onclose={() => (app.memoryDialog = null)}>
+<dialog bind:this={dialog} class="dialog" aria-labelledby="memory-dialog-title" onclose={() => (app.memoryDialog = null)} oncancel={() => (app.memoryDialog = null)}>
   <form onsubmit={submit}>
     <span class="material-symbols-rounded hero-icon" aria-hidden="true">{editing ? "edit" : "star"}</span>
     <h2 id="memory-dialog-title">{editing ? "Edit memory" : "Save memory"}</h2>
@@ -53,7 +59,7 @@
       </p>
     {/if}
     <div class="actions">
-      <button type="button" class="text" onclick={() => dialog.close()}>Cancel</button>
+      <button type="button" class="text" onclick={closeDialog}>Cancel</button>
       <button type="submit" class="text" disabled={!valid || busy}>{editing ? "Save changes" : "Save"}</button>
     </div>
   </form>

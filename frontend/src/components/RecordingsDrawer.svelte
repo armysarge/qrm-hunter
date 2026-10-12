@@ -17,6 +17,7 @@
   let renameDialog = $state<HTMLDialogElement>();
 
   const shown = $derived(app.recordings.filter((r) => matchesRecording(r, query)));
+  const recordingBusy = $derived(app.record.phase === "recording" || app.record.phase === "stopping");
   const close = () => (app.recordingsOpen = false);
 
   function askDelete(r: RecordingInfo) {
@@ -24,9 +25,18 @@
     confirming = r;
     queueMicrotask(() => confirmDialog?.showModal());
   }
+  // State is cleared directly: the native close event is only a backstop.
+  function closeConfirm() {
+    confirming = null;
+    confirmDialog?.close();
+  }
+  function closeRename() {
+    renaming = null;
+    renameDialog?.close();
+  }
   async function confirmDelete() {
     const r = confirming;
-    confirmDialog?.close();
+    closeConfirm();
     if (r) await trashRec(r.id);
   }
   function askRename(r: RecordingInfo) {
@@ -41,7 +51,7 @@
     const r = renaming;
     if (!r) return;
     renameErr = nameError(newName) ?? (await renameRec(r.id, newName));
-    if (renameErr === null) renameDialog?.close();
+    if (renameErr === null) closeRename();
   }
   function onWindowClick(e: MouseEvent) {
     if (menuFor && !(e.target as HTMLElement).closest(".menu, .more")) menuFor = null;
@@ -81,7 +91,8 @@
             {#if truncationNote(r)}<span class="note label-sm warn">{truncationNote(r)}</span>{/if}
           </span>
         </div>
-        <button class="icon" title="Play this recording" aria-label="Play {r.name}" onclick={() => playRecording(r)}>
+        <button class="icon" aria-label="Play {r.name}" disabled={recordingBusy}
+          title={recordingBusy ? "Stop the recording first: playing would end it" : "Play this recording"} onclick={() => playRecording(r)}>
           <span class="material-symbols-rounded" aria-hidden="true">play_arrow</span>
         </button>
         <button class="icon" title="Analyse this recording" aria-label="Analyse {r.name}"
@@ -124,18 +135,18 @@
 </aside>
 
 {#if confirming}
-  <dialog bind:this={confirmDialog} class="confirm" aria-labelledby="rec-confirm-title" onclose={() => (confirming = null)}>
+  <dialog bind:this={confirmDialog} class="confirm" aria-labelledby="rec-confirm-title" onclose={() => (confirming = null)} oncancel={() => (confirming = null)}>
     <h2 id="rec-confirm-title">Move to the recycle bin?</h2>
     <p>“{confirming.name}” will be moved to the recycle bin, where you can still restore it.</p>
     <div class="actions">
-      <button class="text" onclick={() => confirmDialog?.close()}>Cancel</button>
+      <button class="text" onclick={closeConfirm}>Cancel</button>
       <button class="text" onclick={confirmDelete}>Move</button>
     </div>
   </dialog>
 {/if}
 
 {#if renaming}
-  <dialog bind:this={renameDialog} class="confirm" aria-labelledby="rec-rename-title" onclose={() => (renaming = null)}>
+  <dialog bind:this={renameDialog} class="confirm" aria-labelledby="rec-rename-title" onclose={() => (renaming = null)} oncancel={() => (renaming = null)}>
     <form onsubmit={submitRename}>
       <h2 id="rec-rename-title">Rename recording</h2>
       <label class="field rename">
@@ -144,7 +155,7 @@
       </label>
       {#if renameErr}<p class="status label-sm" role="alert">{renameErr}</p>{/if}
       <div class="actions">
-        <button type="button" class="text" onclick={() => renameDialog?.close()}>Cancel</button>
+        <button type="button" class="text" onclick={closeRename}>Cancel</button>
         <button type="submit" class="text">Rename</button>
       </div>
     </form>

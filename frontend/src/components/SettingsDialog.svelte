@@ -7,30 +7,39 @@
   let dialog: HTMLDialogElement;
   let form = $state<SettingsForm>(app.settings ? formFromSettings(app.settings) : { prebuffer: "10", folder: "", callsign: "" });
   let busy = $state(false);
+  let saveError = $state<string | null>(null);
   const checked = $derived(validateSettings(form));
   const rate = $derived(app.radio?.sample_rate ?? 2_048_000);
   const seconds = $derived(checked.patch.prebuffer_s ?? 0);
 
   onMount(() => dialog.showModal());
 
+  // State is cleared directly: the native close event is only a backstop.
+  function closeDialog() {
+    app.settingsOpen = false;
+    if (dialog.open) dialog.close();
+  }
+
   async function submit(e: SubmitEvent) {
     e.preventDefault();
     if (busy || Object.keys(checked.errors).length) return;
     busy = true;
-    app.error = null;
+    saveError = null;
     // Only the fields that differ are sent, so saving here cannot touch any other setting.
     const current = app.settings;
     const patch = Object.fromEntries(
       Object.entries(checked.patch).filter(([k, v]) => !current || current[k as keyof typeof current] !== v),
     );
-    if (Object.keys(patch).length) await saveSettings(patch);
+    if (Object.keys(patch).length) saveError = await saveSettings(patch);
     busy = false;
-    await Promise.all([refreshAppInfo(), app.recordingsOpen ? refreshRecordings() : Promise.resolve()]);
-    if (!app.error) dialog.close();
+    if (saveError !== null) return;
+    closeDialog();
+    void refreshAppInfo();
+    if (app.recordingsOpen) void refreshRecordings();
   }
 </script>
 
-<dialog bind:this={dialog} class="dialog" aria-labelledby="settings-title" onclose={() => (app.settingsOpen = false)}>
+<dialog bind:this={dialog} class="dialog" aria-labelledby="settings-title" onclose={() => (app.settingsOpen = false)} oncancel={() => (app.settingsOpen = false)}>
   <form onsubmit={submit}>
     <span class="material-symbols-rounded hero-icon" aria-hidden="true">settings</span>
     <h2 id="settings-title">Settings</h2>
@@ -56,8 +65,9 @@
       </p>
       {#if app.appInfo.signatures_warning}<p class="error" role="alert">{app.appInfo.signatures_warning}</p>{/if}
     {/if}
+    {#if saveError}<p class="error" role="alert">{saveError}</p>{/if}
     <div class="actions">
-      <button type="button" class="text" onclick={() => dialog.close()}>Cancel</button>
+      <button type="button" class="text" onclick={closeDialog}>Cancel</button>
       <button type="submit" class="text" disabled={busy || Object.keys(checked.errors).length > 0}>Save</button>
     </div>
   </form>
