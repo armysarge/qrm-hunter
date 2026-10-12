@@ -18,6 +18,7 @@ async function run(req: AnalyseRequest, label: string): Promise<void> {
   } catch (e) {
     app.analysis = { state: "error", message: (e as Error).message };
   }
+  openPanel(); // the outcome is shown even if the panel was closed meanwhile
 }
 
 export function analyseLive(): Promise<void> {
@@ -32,11 +33,16 @@ export function analyseRecording(id: string, name: string): Promise<void> {
 
 export async function saveAnalysedClip(): Promise<void> {
   const a = app.analysis;
-  if (a.state !== "done" || a.result.source.kind !== "live" || a.saved) return;
+  if (a.state !== "done" || a.result.source.kind !== "live" || a.saved || a.saving) return;
+  const id = a.result.id;
+  app.analysis = { ...a, saving: true };
+  // Only touch the panel if it still shows the result that was being saved.
+  const same = () => app.analysis.state === "done" && app.analysis.result.id === id;
   try {
-    const info = await recordSnapshot({ analysis_id: a.result.id });
-    app.analysis = { ...a, saved: info.id };
+    const info = await recordSnapshot({ analysis_id: id });
+    if (same()) app.analysis = { ...(app.analysis as typeof a), saved: info.id, saving: false };
   } catch (e) {
+    if (same()) app.analysis = { ...(app.analysis as typeof a), saving: false };
     app.error = (e as Error).message;
   }
 }

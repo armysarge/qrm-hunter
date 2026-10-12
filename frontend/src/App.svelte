@@ -164,6 +164,10 @@
       app.spanChoice = "visible";
       return;
     }
+    if (e.key === "Escape" && app.analysisOpen && !app.region && !document.querySelector("[role=menu]")) {
+      closeAnalysis();
+      return;
+    }
     const mk = memoryKey(e, false);
     if (mk?.kind === "save" && app.radio) {
       e.preventDefault();

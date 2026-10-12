@@ -4,7 +4,7 @@ import type { AnalysisResult } from "./types";
 export type AnalysisUi =
   | { state: "idle" }
   | { state: "running"; label: string; startedAt: number }
-  | { state: "done"; result: AnalysisResult; saved: string | null }
+  | { state: "done"; result: AnalysisResult; saved: string | null; saving?: boolean }
   | { state: "error"; message: string };
 
 export const HUNT_PLACEHOLDER = "Step-by-step hunting guides are coming in a later version.";

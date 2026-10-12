@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
   import {
     confidencePct, confidenceTone, featureRows, HUNT_PLACEHOLDER, rankerNote, sourceLabel, type AnalysisUi,
   } from "../lib/analysis";
@@ -8,8 +7,13 @@
   let { ui, onclose, onsave }: { ui: AnalysisUi; onclose: () => void; onsave: () => void } = $props();
 
   let now = $state(Date.now());
-  const timer = typeof window === "undefined" ? undefined : setInterval(() => (now = Date.now()), 500);
-  onDestroy(() => clearInterval(timer));
+  // Tick only while an analysis runs.
+  $effect(() => {
+    if (ui.state !== "running") return;
+    now = Date.now();
+    const timer = setInterval(() => (now = Date.now()), 500);
+    return () => clearInterval(timer);
+  });
 </script>
 
 <aside class="panel" aria-label="Analysis">
@@ -72,7 +76,7 @@
       {#if ui.saved}
         <span class="label-sm muted"><span class="material-symbols-rounded" aria-hidden="true">check</span>Saved</span>
       {:else}
-        <button class="text" onclick={onsave}>
+        <button class="text" disabled={ui.saving} onclick={onsave}>
           <span class="material-symbols-rounded" aria-hidden="true">save</span>Save as recording
         </button>
       {/if}
